@@ -18,6 +18,16 @@ android {
         release { minifyEnabled false }
     }
 
+    buildFeatures { buildConfig true }
+
+    // "full" has the SMS listener. "lite" has no SMS permission at all, for phones whose
+    // Play Protect blocks apps that read SMS: cashier, owner and soundbox screens only.
+    flavorDimensions 'kind'
+    productFlavors {
+        full { dimension 'kind'; buildConfigField 'boolean', 'LISTENER', 'true' }
+        lite { dimension 'kind'; applicationIdSuffix '.lite'; versionNameSuffix '-lite'; buildConfigField 'boolean', 'LISTENER', 'false' }
+    }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17

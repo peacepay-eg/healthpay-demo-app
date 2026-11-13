@@ -83,8 +83,9 @@ public class MainActivity extends Activity {
             roleButtons.add(b);
         }
 
-        // 3. Listener
+        // 3. Listener (only in the full app)
         LinearLayout c3 = card(col);
+        if (!BuildConfig.LISTENER) c3.setVisibility(View.GONE);
         c3.addView(text("3. This phone as the listener", 16, INK, true));
         c3.addView(text("Use this on the phone that holds the wallet SIM. It passes the wallet's \"money received\" SMS to the server, instead of MacroDroid. Turn off the MacroDroid rule so payments aren't sent twice. Other messages are never read further or sent.", 13, MUTED, false));
         listener = new CheckBox(this);
@@ -105,7 +106,8 @@ public class MainActivity extends Activity {
         Button battery = button(c3, "Let it run in the background", false);
         battery.setOnClickListener(v -> askBattery());
 
-        col.addView(text("Demonstration app · v0.1 · demo wallets only", 11, MUTED, false));
+        if (!BuildConfig.LISTENER) col.addView(text("Lite app: no SMS listener. Keep MacroDroid on the phone with the wallet SIM.", 13, MUTED, false));
+        col.addView(text("Demonstration app · v" + BuildConfig.VERSION_NAME + " · demo wallets only", 11, MUTED, false));
 
         ScrollView sv = new ScrollView(this);
         sv.addView(col);
