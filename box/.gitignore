@@ -1,0 +1,8 @@
+.pio/
+out/
+data/
+sample.wav
+host_test
+*.onnx
+*.onnx.json
+clip_tmp.wav

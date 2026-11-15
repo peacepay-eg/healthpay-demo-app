@@ -3,6 +3,7 @@ name: Build APK
 on:
   push:
     branches: [main]
+    paths-ignore: ['box/**', '.github/workflows/box.yml']
   workflow_dispatch:
 
 permissions:

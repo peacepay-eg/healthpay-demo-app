@@ -1,0 +1,60 @@
+name: Build box firmware
+
+on:
+  push:
+    branches: [main]
+    paths: ['box/**', '.github/workflows/box.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: box
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Tests on the computer (QR text, amount words)
+        run: |
+          g++ -std=c++17 -Wall -Isrc test/host_test.cpp src/meeza.cpp src/words.cpp -o host_test
+          ./host_test test/vectors.txt
+      - name: Tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg espeak-ng
+          pip install -q platformio esptool piper-tts
+      - name: Voice clips
+        run: python tools/make_voice.py data
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ hashFiles('box/platformio.ini') }}
+      - name: Build the four boards
+        run: |
+          for e in cyd cyd_st7789 e32 e32_st7789; do
+            pio run -e $e
+            pio run -e $e -t buildfs
+          done
+      - name: One file per board
+        run: python tools/merge.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HealthPayBox-firmware
+          path: |
+            box/out/*.bin
+            box/sample.wav
+      - name: Publish to the firmware branch
+        run: |
+          mkdir publish && cp out/*.bin sample.wav publish/
+          cd publish
+          printf "Latest build: run %s, commit %s\n" "${{ github.run_number }}" "${GITHUB_SHA::7}" > BUILD.txt
+          git init -q -b firmware
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A && git commit -q -m "Firmware from run ${{ github.run_number }}"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" firmware
