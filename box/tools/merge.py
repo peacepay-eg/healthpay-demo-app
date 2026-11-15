@@ -15,5 +15,5 @@ for env in ENVS:
     subprocess.run([sys.executable, "-m", "esptool", "--chip", "esp32", "merge_bin", "-o", out,
                     "--flash_mode", "dio", "--flash_freq", "40m", "--flash_size", "4MB",
                     "0x1000", b + "bootloader.bin", "0x8000", b + "partitions.bin", "0xe000", home,
-                    "0x10000", b + "firmware.bin", "0x210000", b + "littlefs.bin"], check=True)
+                    "0x10000", b + "firmware.bin", "0x190000", b + "littlefs.bin"], check=True)
     print(out, os.path.getsize(out))

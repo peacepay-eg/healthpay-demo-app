@@ -319,7 +319,7 @@ void netTask(void *) {
   }
 }
 
-// ---------------------------------------------------------------- audio (GPIO26 DAC, 16 kHz, 8-bit clips in flash)
+// ---------------------------------------------------------------- audio (GPIO26 DAC, 12 kHz, 8-bit clips in flash)
 static uint8_t *abuf = nullptr;
 static const uint32_t ABUF_MAX = 40000;
 static volatile uint32_t alen = 0, apos = 0;
@@ -350,9 +350,9 @@ void audioBegin() {
 #endif
   ampOn(false);
   dacWrite(26, 128);
-  atimer = timerBegin(0, 5, true);  // 80 MHz / 5 = 16 MHz
+  atimer = timerBegin(0, 4, true);  // 80 MHz / 4 = 20 MHz
   timerAttachInterrupt(atimer, &onAudioTick, true);
-  timerAlarmWrite(atimer, 1000, true);  // 16 kHz
+  timerAlarmWrite(atimer, 1667, true);  // 12 kHz
   timerAlarmEnable(atimer);
 }
 

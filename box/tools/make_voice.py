@@ -1,4 +1,4 @@
-"""Makes the box's Arabic voice clips (16 kHz, 8-bit unsigned, mono, raw).
+"""Makes the box's Arabic voice clips (12 kHz, 8-bit unsigned, mono, raw).
 
 Runs on the GitHub build machine: python tools/make_voice.py data
 Uses the Piper voice "ar_JO-kareem-medium" (open licence); falls back to
@@ -15,7 +15,8 @@ import urllib.request
 import wave
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else "data"
-RATE = 16000
+RATE = 12000
+SPEED = 0.9  # a little faster than normal speech
 VOICE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/ar/ar_JO/kareem/medium/"
 VOICE = "ar_JO-kareem-medium.onnx"
 
@@ -58,14 +59,18 @@ class Piper:
     def say(self, text, path):
         with wave.open(path, "wb") as w:
             if hasattr(self.voice, "synthesize_wav"):
-                self.voice.synthesize_wav(text, w)
+                try:
+                    from piper import SynthesisConfig
+                    self.voice.synthesize_wav(text, w, syn_config=SynthesisConfig(length_scale=SPEED))
+                except ImportError:
+                    self.voice.synthesize_wav(text, w)
             else:
-                self.voice.synthesize(text, w)
+                self.voice.synthesize(text, w, length_scale=SPEED)
 
 
 class Espeak:
     def say(self, text, path):
-        subprocess.run(["espeak-ng", "-v", "ar", "-s", "150", "-w", path, text], check=True)
+        subprocess.run(["espeak-ng", "-v", "ar", "-s", "165", "-w", path, text], check=True)
 
 
 def to_pcm16(path):
@@ -108,7 +113,7 @@ def main():
     for key, text in clips().items():
         engine.say(text, tmp)
         data = to_u8(to_pcm16(tmp))
-        if len(data) > 40000:  # the box plays clips of up to 2.5 seconds
+        if len(data) > 40000:  # the box plays clips of up to 3.3 seconds
             data = data[:40000]
         with open(os.path.join(OUT, key + ".u8"), "wb") as f:
             f.write(data)
@@ -120,7 +125,7 @@ def main():
     made["ding"] = d
     total += len(d)
     print("voice: %s, %d clips, %d bytes" % (name, len(made), total))
-    if total > 1_800_000:
+    if total > 2_000_000:
         sys.exit("Voice clips too large for the flash")
     # A whole phrase to listen to: received 1,250 pounds from ...620
     phrase = ["ding", "recv", "k1", "wa", "h200", "wa", "n50", "egp", "from", "n6", "n2", "d0"]
