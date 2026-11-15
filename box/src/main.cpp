@@ -833,6 +833,19 @@ void loop() {
   for (auto &e : evs) {
     announce(e);
     if (screen == SCR_HOME) drawTop();
+    // A payment of the sale's amount while its QR is showing: show the tick at
+    // once. The server attaches it to the sale (straight away, or after the
+    // owner's waiting time when two sales could own it).
+    if (screen == SCR_QR) {
+      Lock l;
+      if (S.sale.number && e.amount == S.sale.amount && (e.sale == 0 || e.sale == S.sale.number)) {
+        S.sale.status = "paid";
+        S.sale.paid = e.amount;
+        S.sale.diff = 0;
+        S.sale.from3 = e.from3;
+        S.sale.method = e.label;
+      }
+    }
   }
 
   // Online dot / toast expiry on the home screen.
