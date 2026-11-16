@@ -50,7 +50,17 @@ bool valid(const std::string &base) {
   return crc16(base.substr(0, base.size() - 4)) == upper(base.substr(base.size() - 4));
 }
 
-std::string saleQr(const std::string &base, long amountEgp, long bill) {
+static std::string termLabel(const std::string &t) {
+  std::string o;
+  for (char c : t) {
+    if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
+    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) o += c;
+    if (o.size() >= 25) break;
+  }
+  return o.empty() ? "MAIN" : o;
+}
+
+std::string saleQr(const std::string &base, long amountEgp, long bill, const std::string &terminal) {
   if (!valid(base)) return "";
   Tlv tags;
   if (!read(base, tags)) return "";
@@ -64,7 +74,7 @@ std::string saleQr(const std::string &base, long amountEgp, long bill) {
       Tlv sub;
       if (read(t.second, sub))
         for (auto &x : sub)
-          if (x.first != "01" && x.first != "05") extra += tlv(x.first, x.second);
+          if (x.first != "01" && x.first != "05" && x.first != "07") extra += tlv(x.first, x.second);
     }
   }
   for (auto &t : tags) {
@@ -74,7 +84,7 @@ std::string saleQr(const std::string &base, long amountEgp, long bill) {
     else if (tag == "58") out += tlv("54", amt) + tlv("58", t.second);
     else out += tlv(tag, t.second);
   }
-  out += tlv("62", extra + tlv("01", billS));
+  out += tlv("62", extra + tlv("01", billS) + (terminal.empty() ? std::string() : tlv("07", termLabel(terminal))));
   out += "6304";
   return out + crc16(out);
 }

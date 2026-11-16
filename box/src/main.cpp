@@ -33,7 +33,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.2.0"
+#define BOX_VERSION "0.3.0"
 #ifndef BOX_BOARD
 #define BOX_BOARD "unknown"
 #endif
@@ -70,7 +70,7 @@ struct Settings {
 
 // What the server told us last time (kept so the box also works offline).
 struct Cache {
-  String shopName, qrBase;
+  String shopName, qrBase, termId, termName;
   long next = 0, to = 0;
 } cache;
 
@@ -79,7 +79,7 @@ void loadSettings() {
   cfg.url = prefs.getString("url", "");
   cfg.key = prefs.getString("key", "");
   cfg.shop = prefs.getString("shop", "A");
-  cfg.term = prefs.getString("term", "main");
+  cfg.term = prefs.getString("term", "Main counter");
   cfg.invert = prefs.getBool("inv", false);
   cfg.volume = prefs.getInt("vol", 2);
   cfg.calOk = prefs.getBool("calok", false);
@@ -90,6 +90,8 @@ void loadSettings() {
   cfg.by = prefs.getFloat("by", cfg.by);
   cache.shopName = prefs.getString("sname", "");
   cache.qrBase = prefs.getString("qrbase", "");
+  cache.termId = prefs.getString("tid", "");
+  cache.termName = prefs.getString("tname", "");
   cache.next = prefs.getLong("next", 0);
   cache.to = prefs.getLong("to", 0);
   prefs.end();
@@ -120,6 +122,8 @@ void saveCache() {
   prefs.begin("hpbox", false);
   prefs.putString("sname", cache.shopName);
   prefs.putString("qrbase", cache.qrBase);
+  prefs.putString("tid", cache.termId);
+  prefs.putString("tname", cache.termName);
   prefs.putLong("next", cache.next);
   prefs.putLong("to", cache.to);
   prefs.end();
@@ -163,14 +167,28 @@ struct Shared {
 } S;
 
 // ---------------------------------------------------------------- network
+String urlEncode(const String &v) {
+  String o;
+  const char *hex = "0123456789ABCDEF";
+  for (size_t i = 0; i < v.length(); i++) {
+    char c = v[i];
+    if (isalnum((unsigned char)c) || c == '-' || c == '_' || c == '.') o += c;
+    else { o += '%'; o += hex[(c >> 4) & 15]; o += hex[c & 15]; }
+  }
+  return o;
+}
+
 String httpGet(const String &query, int &code) {
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setTimeout(15000);
+  // The counter: its id once the server has told us (after hello), its name before.
+  String term;
+  { Lock l; term = cache.termId.length() ? cache.termId : cfg.term; }
   String url = cfg.url + "?type=box&key=" + cfg.key + "&shop=" + cfg.shop + "&device=" + cfg.device +
-               "&terminal=" + cfg.term + "&main=" + (cfg.term == "main" ? "1" : "0") + "&" + query;
+               "&terminal=" + urlEncode(query.startsWith("action=hello") ? cfg.term : term) + "&" + query;
   if (!http.begin(client, url)) { code = -1; return ""; }
   code = http.GET();
   String body = code > 0 ? http.getString() : "";
@@ -214,6 +232,8 @@ void netHello() {
   cache.qrBase = doc["qrBase"] | "";
   cache.next = doc["block"]["from"] | 0L;
   cache.to = doc["block"]["to"] | 0L;
+  cache.termId = (const char *)(doc["terminal"]["id"] | "");
+  cache.termName = (const char *)(doc["terminal"]["name"] | "");
   S.serverNow = doc["now"] | 0LL;
   if (!S.since) S.since = S.serverNow;
   S.helloDone = true;
@@ -542,7 +562,8 @@ void drawTop() {
   tft.fillRect(0, 0, 320, 30, C_ORANGE);
   tft.setTextColor(TFT_WHITE, C_ORANGE);
   tft.setTextDatum(ML_DATUM);
-  String counter = cfg.term == "main" ? String("Main counter") : cfg.term.startsWith("t") ? "Counter " + cfg.term.substring(1) : cfg.term;
+  String counter;
+  { Lock l; counter = cache.termName.length() ? cache.termName : cfg.term; }
   tft.drawString((name.length() ? name : String("HealthPay box")) + " - " + counter, 8, 15, 2);
   if (toast.length() && millis() < toastUntil) {
     tft.fillRect(0, 0, 320, 30, C_GREEN_DARK);
@@ -683,7 +704,7 @@ void drawSettings() {
   tft.setTextColor(C_MUTED, C_BG);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(cfg.device + "  Wi-Fi " + (WiFi.status() == WL_CONNECTED ? WiFi.SSID() + " " + ip : String("not connected")), 8, 196, 2);
-  tft.drawString(String("Server ") + (online ? "OK" : "offline") + "  bills " + String(next) + "-" + String(to) + "  shop " + cfg.shop + " " + cfg.term, 8, 212, 2);
+  tft.drawString(String("Server ") + (online ? "OK" : "offline") + "  bills " + String(next) + "-" + String(to) + "  shop " + cfg.shop, 8, 212, 2);
   if (err.length()) { tft.setTextColor(C_RED, C_BG); tft.drawString(err.substring(0, 50), 8, 226, 1); }
 }
 
@@ -711,7 +732,7 @@ void showSetupInfo(const String &ap) {
   tft.drawString("   Tap Configure WiFi, pick your Wi-Fi,", 8, 118, 2);
   tft.drawString("   type its password.", 8, 136, 2);
   tft.drawString("3. Paste the server link and the key,", 8, 158, 2);
-  tft.drawString("   shop A, counter (main), then Save.", 8, 176, 2);
+  tft.drawString("   shop A, the counter name, then Save.", 8, 176, 2);
   tft.setTextColor(C_MUTED, C_BG);
   tft.drawString("Phone hotspots work too (2.4 GHz only).", 8, 206, 2);
 }
@@ -721,7 +742,7 @@ void runPortal() {
   WiFiManagerParameter pUrl("url", "Server link (ends with /exec)", cfg.url.c_str(), 220);
   WiFiManagerParameter pKey("key", "Key", cfg.key.c_str(), 40);
   WiFiManagerParameter pShop("shop", "Shop", cfg.shop.c_str(), 4);
-  WiFiManagerParameter pTerm("term", "Counter: main, t2, t3, t4 or t5", cfg.term.c_str(), 20);
+  WiFiManagerParameter pTerm("term", "Counter name (e.g. Main counter, Front desk)", cfg.term.c_str(), 30);
   wm.addParameter(&pUrl);
   wm.addParameter(&pKey);
   wm.addParameter(&pShop);
@@ -740,8 +761,9 @@ void runPortal() {
   if (cfg.shop.isEmpty()) cfg.shop = "A";
   cfg.term = String(pTerm.getValue());
   cfg.term.trim();
-  cfg.term.toLowerCase();
-  if (cfg.term.isEmpty()) cfg.term = "main";
+  if (cfg.term.isEmpty()) cfg.term = "Main counter";
+  cache.termId = "";  // the server gives the id again at the next hello
+  saveCache();
   saveSettings();
   ESP.restart();
 }
@@ -766,7 +788,7 @@ void startSale(long amount) {
     S.ops.push_back(Op{OP_SALE, number, amount});
     S.lastPollMs = millis();
   }
-  qrText = meeza::saleQr(cache.qrBase.c_str(), amount, number);
+  qrText = meeza::saleQr(cache.qrBase.c_str(), amount, number, cache.termId.length() ? cache.termId.c_str() : "main");
   screen = SCR_QR;
   dirty = true;
 }

@@ -11,5 +11,6 @@ std::string crc16(const std::string &s);
 // True if the text looks like a valid EMV QR (starts 000201, checksum right).
 bool valid(const std::string &base);
 // One-sale QR text, or "" if the base QR is not valid.
-std::string saleQr(const std::string &base, long amountEgp, long bill);
+// terminal: the device's terminal ID (EMV tag 62, sub-tag 07); empty for none.
+std::string saleQr(const std::string &base, long amountEgp, long bill, const std::string &terminal = "");
 }

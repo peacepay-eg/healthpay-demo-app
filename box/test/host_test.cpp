@@ -9,14 +9,14 @@ static int fails = 0, passes = 0;
 static void check(bool ok, const std::string &what) { if (ok) passes++; else { fails++; printf("FAIL %s\n", what.c_str()); } }
 static std::string join(const std::vector<std::string> &v) { std::string s; for (auto &x : v) s += (s.empty() ? "" : " ") + x; return s; }
 int main(int argc, char **argv) {
-  // vectors.txt lines: base|amount|bill|expected  (made by the server's own meezaQr_)
+  // vectors.txt lines: base|amount|bill|terminal|expected  (made by the server's own meezaQr_)
   std::ifstream f(argc > 1 ? argv[1] : "vectors.txt");
   std::string line; int n = 0;
   while (std::getline(f, line)) {
     if (line.empty()) continue;
-    std::stringstream ss(line); std::string base, amt, bill, want;
-    std::getline(ss, base, '|'); std::getline(ss, amt, '|'); std::getline(ss, bill, '|'); std::getline(ss, want, '|');
-    std::string got = meeza::saleQr(base, std::stol(amt), std::stol(bill));
+    std::stringstream ss(line); std::string base, amt, bill, term, want;
+    std::getline(ss, base, '|'); std::getline(ss, amt, '|'); std::getline(ss, bill, '|'); std::getline(ss, term, '|'); std::getline(ss, want, '|');
+    std::string got = meeza::saleQr(base, std::stol(amt), std::stol(bill), term);
     check(got == want, "QR " + amt + " " + bill + "\n  got  " + got + "\n  want " + want); n++;
   }
   check(n >= 3, "QR vectors read");
