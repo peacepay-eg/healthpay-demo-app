@@ -37,7 +37,8 @@ public class WebActivity extends Activity {
         super.onCreate(savedInstanceState);
         String page = getIntent().getStringExtra(EXTRA_PAGE);
         if (page == null) page = "pos";
-        if ("box".equals(page)) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        // The soundbox and the cashier screen (which can also speak) stay awake.
+        if ("box".equals(page) || "pos".equals(page)) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         tts = new TextToSpeech(this, status -> {
             if (status != TextToSpeech.SUCCESS) return;
