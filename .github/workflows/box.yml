@@ -22,7 +22,7 @@ jobs:
           python-version: '3.11'
       - name: Tests on the computer (QR text, amount words)
         run: |
-          g++ -std=c++17 -Wall -Isrc test/host_test.cpp src/meeza.cpp src/words.cpp -o host_test
+          g++ -std=c++17 -Wall -Isrc test/host_test.cpp src/meeza.cpp src/words.cpp src/tips.cpp -o host_test
           ./host_test test/vectors.txt
       - name: Tools
         run: |
@@ -34,9 +34,9 @@ jobs:
         with:
           path: ~/.platformio
           key: pio-${{ hashFiles('box/platformio.ini') }}
-      - name: Build the four boards
+      - name: Build the four boards, shop and restaurant
         run: |
-          for e in cyd cyd_st7789 e32 e32_st7789; do
+          for e in cyd cyd_st7789 e32 e32_st7789 cyd_rest cyd_st7789_rest e32_rest e32_st7789_rest; do
             pio run -e $e
             pio run -e $e -t buildfs
           done

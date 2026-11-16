@@ -4,9 +4,12 @@ import os
 import subprocess
 import sys
 
-ENVS = ["cyd", "cyd_st7789", "e32", "e32_st7789"]
-NAMES = {"cyd": "HealthPayBox_2432S028R", "cyd_st7789": "HealthPayBox_2432S028_ST7789",
-         "e32": "HealthPayBox_E32R28T", "e32_st7789": "HealthPayBox_E32R28T_ST7789"}
+BOARDS = {"cyd": "2432S028R", "cyd_st7789": "2432S028_ST7789", "e32": "E32R28T", "e32_st7789": "E32R28T_ST7789"}
+ENVS, NAMES = [], {}
+for env, board in BOARDS.items():
+    ENVS += [env, env + "_rest"]
+    NAMES[env] = "HealthPayBox_Shop_" + board
+    NAMES[env + "_rest"] = "HealthPayBox_Restaurant_" + board
 home = os.path.expanduser("~/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin")
 os.makedirs("out", exist_ok=True)
 for env in ENVS:

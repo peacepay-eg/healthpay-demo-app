@@ -10,6 +10,10 @@
 //   cyd_st7789 the same board with an ST7789 screen (some USB-C versions)
 //   e32        2.8" ESP32-32E (E32R28T), ILI9341, touch shares the screen's bus
 //   e32_st7789 the same with an ST7789 screen
+// Each also comes as a restaurant version (*_rest, BOX_RESTAURANT): before the
+// QR the cashier picks who served the table and the buyer picks a tip; the QR
+// is for the bill plus the tip. It acts like the shop version when the
+// server's business type for the shop is not a restaurant.
 //
 // Demo only: the server's TLS certificate is not checked (setInsecure).
 
@@ -28,12 +32,20 @@
 #include "meeza.h"
 #include "words.h"
 #include "hpqr.h"
+#include "tips.h"
 #ifdef BOX_TOUCH_OWN_BUS
 #include <SPI.h>
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.3.0"
+#define BOX_VERSION "0.4.0"
+#ifdef BOX_RESTAURANT
+static const bool RESTAURANT = true;
+#define BOX_KIND "Restaurant"
+#else
+static const bool RESTAURANT = false;
+#define BOX_KIND "Shop"
+#endif
 #ifndef BOX_BOARD
 #define BOX_BOARD "unknown"
 #endif
@@ -140,10 +152,12 @@ enum OpKind { OP_SALE, OP_CANCEL };
 struct Op {
   OpKind kind;
   long number, amount;
+  long tip;
+  String waiter;
 };
 
 struct SaleView {
-  long number = 0, amount = 0;
+  long number = 0, amount = 0, tip = 0;
   bool registered = false;
   String status = "";  // from the server: waiting, paid, screenshot, approval, expired, cancelled
   long paid = 0, diff = 0;
@@ -156,8 +170,14 @@ struct Event {
   bool check;
 };
 
+struct StaffItem {
+  String id, label;
+};
+
 struct Shared {
   bool online = false, helloDone = false, needHello = true;
+  bool tips = false;               // the server says this shop is a restaurant
+  std::vector<StaffItem> staff;    // on shift, for "Served by"
   String error;  // last server error, shown in settings
   long long serverNow = 0, since = 0;
   std::vector<Op> ops;
@@ -224,6 +244,19 @@ bool callServer(const String &query, JsonDocument &doc) {
   return true;
 }
 
+// Restaurant: whether tips are on, and who is on shift (called with the lock held).
+void readStaff(JsonDocument &doc) {
+  if (!doc["tips"].is<bool>()) return;
+  S.tips = doc["tips"] | false;
+  S.staff.clear();
+  for (JsonObject st : doc["staff"].as<JsonArray>()) {
+    StaffItem it;
+    it.id = (const char *)(st["id"] | "");
+    it.label = (const char *)(st["label"] | "");
+    if (it.id.length() && S.staff.size() < 6) S.staff.push_back(it);
+  }
+}
+
 void netHello() {
   JsonDocument doc;
   if (!callServer("action=hello", doc)) return;
@@ -235,6 +268,7 @@ void netHello() {
   cache.termId = (const char *)(doc["terminal"]["id"] | "");
   cache.termName = (const char *)(doc["terminal"]["name"] | "");
   S.serverNow = doc["now"] | 0LL;
+  readStaff(doc);
   if (!S.since) S.since = S.serverNow;
   S.helloDone = true;
   S.needHello = false;
@@ -263,6 +297,8 @@ void netOps() {
   JsonDocument doc;
   String q = op.kind == OP_SALE ? "action=sale&number=" + String(op.number) + "&amount=" + String(op.amount)
                                 : "action=cancel&number=" + String(op.number);
+  if (op.kind == OP_SALE && op.tip > 0) q += "&tip=" + String(op.tip);
+  if (op.kind == OP_SALE && op.waiter.length()) q += "&waiter=" + urlEncode(op.waiter);
   bool ok = callServer(q, doc);
   Lock l;
   if (!ok && S.online && op.kind == OP_SALE) {
@@ -293,6 +329,7 @@ void netPoll() {
   if (!callServer(q, doc)) return;
   Lock l;
   S.serverNow = doc["now"] | S.serverNow;
+  readStaff(doc);
   for (JsonObject s : doc["sales"].as<JsonArray>()) {
     if ((long)(s["number"] | 0L) != S.sale.number) continue;
     S.sale.status = (const char *)(s["status"] | "");
@@ -542,13 +579,23 @@ void drawTick(int cx, int cy, int r, uint16_t c) {
 }
 
 // ---------------------------------------------------------------- screens
-enum Screen { SCR_HOME, SCR_QR, SCR_RESULT, SCR_SETTINGS };
+enum Screen { SCR_HOME, SCR_QR, SCR_RESULT, SCR_SETTINGS, SCR_WAITER, SCR_TIP };
 Screen screen = SCR_HOME;
 bool dirty = true;
 String typed = "";
 String toast = "";
 uint32_t toastUntil = 0, resultSince = 0;
 bool lastOnline = false;
+// Restaurant: the bill being paid, who served it, and the tip choices.
+long billAmount = 0;
+String waiterId = "", waiterLabel = "";
+long tipChoice[3] = {1, 2, 5};
+
+bool tipsOn() {
+  if (!RESTAURANT) return false;
+  Lock l;
+  return S.tips;
+}
 
 const char *KEYS[4][4] = {{"1", "2", "3", "Del"}, {"4", "5", "6", "Clear"}, {"7", "8", "9", ""}, {"00", "0", "", ""}};
 Btn keyBtn(int r, int c) { return Btn{4 + c * 79, 84 + r * 39, 75, 35}; }
@@ -591,7 +638,7 @@ void drawHome() {
       button(keyBtn(r, c), KEYS[r][c], C_KEY, C_INK, word ? 2 : 4);
     }
   bool ok = typed.toInt() > 0;
-  button(BTN_QR, "QR", ok ? C_ORANGE : C_LINE, TFT_WHITE, 4);
+  button(BTN_QR, tipsOn() ? "Next" : "QR", ok ? C_ORANGE : C_LINE, TFT_WHITE, 4);
 }
 
 void drawAmountOnly() {
@@ -600,7 +647,7 @@ void drawAmountOnly() {
   tft.setTextColor(C_INK, C_BG);
   tft.drawString(typed.length() ? money(typed.toInt()) : String("0"), 270, 58, 6);
   bool ok = typed.toInt() > 0;
-  button(BTN_QR, "QR", ok ? C_ORANGE : C_LINE, TFT_WHITE, 4);
+  button(BTN_QR, tipsOn() ? "Next" : "QR", ok ? C_ORANGE : C_LINE, TFT_WHITE, 4);
 }
 
 std::string qrText;
@@ -624,8 +671,8 @@ void drawQr() {
     tft.setTextDatum(MC_DATUM);
     tft.drawString("QR too long", 117, 120, 2);
   }
-  long amount, number;
-  { Lock l; amount = S.sale.amount; number = S.sale.number; }
+  long amount, number, tip;
+  { Lock l; amount = S.sale.amount; number = S.sale.number; tip = S.sale.tip; }
   tft.setTextColor(C_MUTED, C_BG);
   tft.setTextDatum(TL_DATUM);
   tft.drawString("Pay", 240, 6, 2);
@@ -634,6 +681,7 @@ void drawQr() {
   tft.setTextColor(C_MUTED, C_BG);
   tft.drawString("EGP", 240, 52, 2);
   tft.drawString("Bill " + String(number), 240, 78, 2);
+  if (tip > 0) { tft.setTextColor(C_GREEN_DARK, C_BG); tft.drawString("Tip " + money(tip), 240, 92, 2); tft.setTextColor(C_MUTED, C_BG); }
   tft.drawString("Scan with", 240, 108, 2);
   tft.drawString("any wallet", 240, 124, 2);
   button(BTN_CANCEL, "Cancel", C_KEY, C_INK, 2);
@@ -653,9 +701,9 @@ void drawQrStatus() {
 }
 
 void drawResult() {
-  long amount, paid, diff;
+  long amount, paid, diff, tip;
   String from3, method, status;
-  { Lock l; amount = S.sale.amount; paid = S.sale.paid; diff = S.sale.diff; from3 = S.sale.from3; method = S.sale.method; status = S.sale.status; }
+  { Lock l; amount = S.sale.amount; paid = S.sale.paid; diff = S.sale.diff; from3 = S.sale.from3; method = S.sale.method; status = S.sale.status; tip = S.sale.tip; }
   bool expired = status == "expired" || status == "cancelled" || status == "refused";
   uint16_t bg = expired ? C_MUTED : diff < 0 ? C_AMBER : C_GREEN;
   tft.fillScreen(bg);
@@ -677,6 +725,7 @@ void drawResult() {
   tft.drawString(d, 160, 150, 2);
   if (diff < 0) tft.drawString("Still owed " + money(-diff) + " EGP", 160, 185, 4);
   else if (diff > 0) tft.drawString(money(diff) + " EGP more than the bill", 160, 185, 2);
+  else if (tip > 0) tft.drawString("Includes a tip of " + money(tip) + " EGP. Thank you!", 160, 185, 2);
   tft.drawString("Tap for a new sale", 160, 222, 2);
 }
 
@@ -689,7 +738,7 @@ void drawSettings() {
   tft.fillRect(0, 0, 320, 30, C_INK);
   tft.setTextColor(TFT_WHITE, C_INK);
   tft.setTextDatum(ML_DATUM);
-  tft.drawString("Settings  v" BOX_VERSION "  " BOX_BOARD, 8, 15, 2);
+  tft.drawString("Settings  v" BOX_VERSION "  " BOX_KIND "  " BOX_BOARD, 8, 15, 2);
   button(SB_WIFI, "Wi-Fi & server", C_KEY, C_INK, 2);
   button(SB_CAL, "Touch setup", C_KEY, C_INK, 2);
   button(SB_INV, cfg.invert ? "Colours: inverted" : "Colours: normal", C_KEY, C_INK, 2);
@@ -706,6 +755,56 @@ void drawSettings() {
   tft.drawString(cfg.device + "  Wi-Fi " + (WiFi.status() == WL_CONNECTED ? WiFi.SSID() + " " + ip : String("not connected")), 8, 196, 2);
   tft.drawString(String("Server ") + (online ? "OK" : "offline") + "  bills " + String(next) + "-" + String(to) + "  shop " + cfg.shop, 8, 212, 2);
   if (err.length()) { tft.setTextColor(C_RED, C_BG); tft.drawString(err.substring(0, 50), 8, 226, 1); }
+}
+
+// Restaurant: who served the table (cashier side)
+Btn staffBtn(int i) { return Btn{8 + (i % 2) * 156, 40 + (i / 2) * 48, 148, 42}; }
+const Btn WB_BACK{8, 190, 148, 44}, WB_NONE{164, 190, 148, 44};
+
+void drawWaiter() {
+  std::vector<StaffItem> staff;
+  { Lock l; staff = S.staff; }
+  tft.fillScreen(C_BG);
+  tft.fillRect(0, 0, 320, 30, C_INK);
+  tft.setTextColor(TFT_WHITE, C_INK);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString("Served by?   Bill " + money(billAmount) + " EGP", 8, 15, 2);
+  for (size_t i = 0; i < staff.size() && i < 6; i++) button(staffBtn(i), staff[i].label.c_str(), C_KEY, C_INK, 2);
+  button(WB_BACK, "Back", C_KEY, C_INK, 2);
+  button(WB_NONE, "No one", C_KEY, C_INK, 2);
+}
+
+// Restaurant: the buyer picks a tip (turn the box to the buyer)
+Btn tipBtn(int i) { return Btn{8 + (i % 2) * 156, 92 + (i / 2) * 72, 148, 64}; }
+const Btn TB_BACK{232, 0, 88, 30};
+
+void tipButton(int i, const String &big, const String &small) {
+  Btn b = tipBtn(i);
+  bool none = i == 0;
+  uint16_t bg = none ? C_KEY : C_ORANGE, fg = none ? C_INK : TFT_WHITE;
+  tft.fillRoundRect(b.x, b.y, b.w, b.h, 10, bg);
+  tft.setTextColor(fg, bg);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(big, b.x + b.w / 2, b.y + 22, 4);
+  tft.drawString(small, b.x + b.w / 2, b.y + 48, 2);
+}
+
+void drawTip() {
+  tips::options(billAmount, tipChoice);
+  tft.fillScreen(C_BG);
+  tft.fillRect(0, 0, 320, 30, C_ORANGE);
+  tft.setTextColor(TFT_WHITE, C_ORANGE);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString("Add a tip?", 8, 15, 2);
+  tft.setTextDatum(MR_DATUM);
+  tft.drawString("Back", 312, 15, 2);
+  tft.setTextColor(C_INK, C_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString("Bill " + money(billAmount) + " EGP", 8, 52, 4);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.drawString(waiterLabel.length() ? "Served by " + waiterLabel : String("Thank you for visiting"), 8, 78, 2);
+  tipButton(0, "No tip", "Pay " + money(billAmount));
+  for (int i = 0; i < 3; i++) tipButton(i + 1, "+" + money(tipChoice[i]), "Pay " + money(billAmount + tipChoice[i]));
 }
 
 // ---------------------------------------------------------------- Wi-Fi setup portal
@@ -769,7 +868,7 @@ void runPortal() {
 }
 
 // ---------------------------------------------------------------- sale flow
-void startSale(long amount) {
+void startSale(long amount, long tip = 0, const String &waiter = "") {
   long number;
   {
     Lock l;
@@ -784,8 +883,9 @@ void startSale(long amount) {
     S.sale = SaleView();
     S.sale.number = number;
     S.sale.amount = amount;
+    S.sale.tip = tip;
     S.sale.status = "waiting";
-    S.ops.push_back(Op{OP_SALE, number, amount});
+    S.ops.push_back(Op{OP_SALE, number, amount, tip, waiter});
     S.lastPollMs = millis();
   }
   qrText = meeza::saleQr(cache.qrBase.c_str(), amount, number, cache.termId.length() ? cache.termId.c_str() : "main");
@@ -799,7 +899,7 @@ void cancelSale() {
   bool wasQueued = false;
   for (size_t i = 0; i < S.ops.size(); i++)
     if (S.ops[i].kind == OP_SALE && S.ops[i].number == n) { S.ops.erase(S.ops.begin() + i); wasQueued = true; break; }
-  if (!wasQueued && n) S.ops.push_back(Op{OP_CANCEL, n, 0});
+  if (!wasQueued && n) S.ops.push_back(Op{OP_CANCEL, n, 0, 0, ""});
   S.sale = SaleView();
 }
 
@@ -898,6 +998,8 @@ void loop() {
     else if (screen == SCR_QR) { drawQr(); drawQrStatus(); }
     else if (screen == SCR_RESULT) drawResult();
     else if (screen == SCR_SETTINGS) drawSettings();
+    else if (screen == SCR_WAITER) drawWaiter();
+    else if (screen == SCR_TIP) drawTip();
   }
 
   // The sale on screen: watch its status.
@@ -943,7 +1045,19 @@ void loop() {
   if (screen == SCR_HOME) {
     if (BTN_QR.hit(x, y)) {
       long amount = typed.toInt();
-      if (amount > 0) startSale(amount);
+      if (amount <= 0) return;
+      if (tipsOn()) {
+        // Restaurant: who served it, then the buyer's tip, then the QR.
+        billAmount = amount;
+        waiterId = "";
+        waiterLabel = "";
+        bool anyStaff;
+        { Lock l; anyStaff = !S.staff.empty(); }
+        screen = anyStaff ? SCR_WAITER : SCR_TIP;
+        dirty = true;
+      } else {
+        startSale(amount);
+      }
       return;
     }
     for (int r = 0; r < 4; r++)
@@ -967,6 +1081,28 @@ void loop() {
     typed = "";
     screen = SCR_HOME;
     dirty = true;
+  } else if (screen == SCR_WAITER) {
+    if (WB_BACK.hit(x, y)) { screen = SCR_HOME; dirty = true; return; }
+    if (WB_NONE.hit(x, y)) { waiterId = ""; waiterLabel = ""; screen = SCR_TIP; dirty = true; return; }
+    std::vector<StaffItem> staff;
+    { Lock l; staff = S.staff; }
+    for (size_t i = 0; i < staff.size() && i < 6; i++)
+      if (staffBtn(i).hit(x, y)) { waiterId = staff[i].id; waiterLabel = staff[i].label; screen = SCR_TIP; dirty = true; return; }
+  } else if (screen == SCR_TIP) {
+    if (TB_BACK.hit(x, y)) {
+      bool anyStaff;
+      { Lock l; anyStaff = !S.staff.empty(); }
+      screen = anyStaff ? SCR_WAITER : SCR_HOME;
+      dirty = true;
+      return;
+    }
+    for (int i = 0; i < 4; i++) {
+      if (!tipBtn(i).hit(x, y)) continue;
+      long tip = i == 0 ? 0 : tipChoice[i - 1];
+      startSale(billAmount + tip, tip, waiterId);
+      if (screen != SCR_QR) { screen = SCR_HOME; dirty = true; }  // no numbers yet: the toast says why
+      return;
+    }
   } else if (screen == SCR_SETTINGS) {
     if (SB_WIFI.hit(x, y)) runPortal();
     else if (SB_CAL.hit(x, y)) { calibrate(); dirty = true; }

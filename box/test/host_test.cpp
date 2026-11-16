@@ -1,6 +1,7 @@
-// Runs on a computer: g++ -std=c++17 -I../src host_test.cpp ../src/meeza.cpp ../src/words.cpp
+// Runs on a computer: g++ -std=c++17 -I../src host_test.cpp ../src/meeza.cpp ../src/words.cpp ../src/tips.cpp
 #include "meeza.h"
 #include "words.h"
+#include "tips.h"
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -35,6 +36,11 @@ int main(int argc, char **argv) {
   check(words::amount(0).empty() && words::amount(1000000).empty(), "out of range");
   check(join(words::received(50, "620")) == "ding recv n50 egp from n6 n2 d0", "received with digits");
   check(join(words::received(7, "")) == "ding recv n7 egp", "received, no digits");
+  long t[3];
+  tips::options(3, t); check(t[0] == 1 && t[1] == 2 && t[2] == 5, "tips small bill");
+  tips::options(99, t); check(t[0] == 1 && t[2] == 5, "tips 99");
+  tips::options(100, t); check(t[0] == 5 && t[1] == 10 && t[2] == 15, "tips 100");
+  tips::options(123, t); check(t[0] == 7 && t[1] == 13 && t[2] == 19, "tips round up");
   printf("%d passed, %d failed\n", passes, fails);
   return fails ? 1 : 0;
 }
