@@ -33,7 +33,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.1.0"
+#define BOX_VERSION "0.2.0"
 #ifndef BOX_BOARD
 #define BOX_BOARD "unknown"
 #endif
@@ -60,7 +60,7 @@ XPT2046_Touchscreen ts(33, 36);
 
 // ---------------------------------------------------------------- settings
 struct Settings {
-  String url, key, shop, device;
+  String url, key, shop, device, term;
   bool invert = false;
   int volume = 2;  // 1..3
   bool calOk = false;
@@ -79,6 +79,7 @@ void loadSettings() {
   cfg.url = prefs.getString("url", "");
   cfg.key = prefs.getString("key", "");
   cfg.shop = prefs.getString("shop", "A");
+  cfg.term = prefs.getString("term", "main");
   cfg.invert = prefs.getBool("inv", false);
   cfg.volume = prefs.getInt("vol", 2);
   cfg.calOk = prefs.getBool("calok", false);
@@ -103,6 +104,7 @@ void saveSettings() {
   prefs.putString("url", cfg.url);
   prefs.putString("key", cfg.key);
   prefs.putString("shop", cfg.shop);
+  prefs.putString("term", cfg.term);
   prefs.putBool("inv", cfg.invert);
   prefs.putInt("vol", cfg.volume);
   prefs.putBool("calok", cfg.calOk);
@@ -147,6 +149,7 @@ struct SaleView {
 struct Event {
   String id, label, from3;
   long amount, sale;
+  bool check;
 };
 
 struct Shared {
@@ -166,7 +169,8 @@ String httpGet(const String &query, int &code) {
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   http.setTimeout(15000);
-  String url = cfg.url + "?type=box&key=" + cfg.key + "&shop=" + cfg.shop + "&device=" + cfg.device + "&" + query;
+  String url = cfg.url + "?type=box&key=" + cfg.key + "&shop=" + cfg.shop + "&device=" + cfg.device +
+               "&terminal=" + cfg.term + "&main=" + (cfg.term == "main" ? "1" : "0") + "&" + query;
   if (!http.begin(client, url)) { code = -1; return ""; }
   code = http.GET();
   String body = code > 0 ? http.getString() : "";
@@ -284,6 +288,7 @@ void netPoll() {
     ev.label = (const char *)(e["label"] | "");
     ev.from3 = (const char *)(e["from3"] | "");
     ev.sale = e["sale"] | 0L;
+    ev.check = e["check"] | false;
     long long ms = e["ms"] | 0LL;
     if (ms > S.since) S.since = ms;
     if (ev.amount > 0) S.events.push_back(ev);
@@ -537,7 +542,8 @@ void drawTop() {
   tft.fillRect(0, 0, 320, 30, C_ORANGE);
   tft.setTextColor(TFT_WHITE, C_ORANGE);
   tft.setTextDatum(ML_DATUM);
-  tft.drawString(name.length() ? name : String("HealthPay box"), 8, 15, 2);
+  String counter = cfg.term == "main" ? String("Main counter") : cfg.term.startsWith("t") ? "Counter " + cfg.term.substring(1) : cfg.term;
+  tft.drawString((name.length() ? name : String("HealthPay box")) + " - " + counter, 8, 15, 2);
   if (toast.length() && millis() < toastUntil) {
     tft.fillRect(0, 0, 320, 30, C_GREEN_DARK);
     tft.setTextColor(TFT_WHITE, C_GREEN_DARK);
@@ -677,7 +683,7 @@ void drawSettings() {
   tft.setTextColor(C_MUTED, C_BG);
   tft.setTextDatum(TL_DATUM);
   tft.drawString(cfg.device + "  Wi-Fi " + (WiFi.status() == WL_CONNECTED ? WiFi.SSID() + " " + ip : String("not connected")), 8, 196, 2);
-  tft.drawString(String("Server ") + (online ? "OK" : "offline") + "  bills " + String(next) + "-" + String(to) + "  shop " + cfg.shop, 8, 212, 2);
+  tft.drawString(String("Server ") + (online ? "OK" : "offline") + "  bills " + String(next) + "-" + String(to) + "  shop " + cfg.shop + " " + cfg.term, 8, 212, 2);
   if (err.length()) { tft.setTextColor(C_RED, C_BG); tft.drawString(err.substring(0, 50), 8, 226, 1); }
 }
 
@@ -705,7 +711,7 @@ void showSetupInfo(const String &ap) {
   tft.drawString("   Tap Configure WiFi, pick your Wi-Fi,", 8, 118, 2);
   tft.drawString("   type its password.", 8, 136, 2);
   tft.drawString("3. Paste the server link and the key,", 8, 158, 2);
-  tft.drawString("   shop A, then Save.", 8, 176, 2);
+  tft.drawString("   shop A, counter (main), then Save.", 8, 176, 2);
   tft.setTextColor(C_MUTED, C_BG);
   tft.drawString("Phone hotspots work too (2.4 GHz only).", 8, 206, 2);
 }
@@ -715,9 +721,11 @@ void runPortal() {
   WiFiManagerParameter pUrl("url", "Server link (ends with /exec)", cfg.url.c_str(), 220);
   WiFiManagerParameter pKey("key", "Key", cfg.key.c_str(), 40);
   WiFiManagerParameter pShop("shop", "Shop", cfg.shop.c_str(), 4);
+  WiFiManagerParameter pTerm("term", "Counter: main, t2, t3, t4 or t5", cfg.term.c_str(), 20);
   wm.addParameter(&pUrl);
   wm.addParameter(&pKey);
   wm.addParameter(&pShop);
+  wm.addParameter(&pTerm);
   wm.setTitle("HealthPay box");
   wm.setConfigPortalTimeout(0);
   String ap = "HealthPay-" + cfg.device;
@@ -730,6 +738,10 @@ void runPortal() {
   cfg.shop.trim();
   cfg.shop.toUpperCase();
   if (cfg.shop.isEmpty()) cfg.shop = "A";
+  cfg.term = String(pTerm.getValue());
+  cfg.term.trim();
+  cfg.term.toLowerCase();
+  if (cfg.term.isEmpty()) cfg.term = "main";
   saveSettings();
   ESP.restart();
 }
@@ -817,7 +829,8 @@ void setup() {
 
 void announce(const Event &e) {
   say(words::received(e.amount, e.from3.c_str()));
-  toast = "Received " + money(e.amount) + " EGP  " + e.label + (e.from3.length() ? "  ..." + e.from3 : "");
+  toast = e.check ? "Check buyer's number" + (e.from3.length() ? " ..." + e.from3 : String("")) + "  " + money(e.amount) + " EGP"
+                  : "Received " + money(e.amount) + " EGP  " + e.label + (e.from3.length() ? "  ..." + e.from3 : "");
   toastUntil = millis() + 6000;
 }
 
@@ -838,7 +851,7 @@ void loop() {
     // owner's waiting time when two sales could own it).
     if (screen == SCR_QR) {
       Lock l;
-      if (S.sale.number && e.amount == S.sale.amount && (e.sale == 0 || e.sale == S.sale.number)) {
+      if (S.sale.number && e.amount == S.sale.amount && (e.sale == S.sale.number || (e.sale == 0 && !e.check))) {
         S.sale.status = "paid";
         S.sale.paid = e.amount;
         S.sale.diff = 0;
