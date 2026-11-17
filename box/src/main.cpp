@@ -38,7 +38,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.7.1"
+#define BOX_VERSION "0.7.2"
 #ifdef BOX_RESTAURANT
 static const bool RESTAURANT = true;
 #define BOX_KIND "Restaurant"
@@ -84,6 +84,7 @@ struct Settings {
 // What the server told us last time (kept so the box also works offline).
 struct Cache {
   String shopName, qrBase, termId, termName;
+  String termQr;  // the short terminal label in the QR (W01, C02...)
   long next = 0, to = 0;
 } cache;
 
@@ -105,6 +106,7 @@ void loadSettings() {
   cache.shopName = prefs.getString("sname", "");
   cache.qrBase = prefs.getString("qrbase", "");
   cache.termId = prefs.getString("tid", "");
+  cache.termQr = prefs.getString("tqr", "");
   cache.termName = prefs.getString("tname", "");
   cache.next = prefs.getLong("next", 0);
   cache.to = prefs.getLong("to", 0);
@@ -138,6 +140,7 @@ void saveCache() {
   prefs.putString("sname", cache.shopName);
   prefs.putString("qrbase", cache.qrBase);
   prefs.putString("tid", cache.termId);
+  prefs.putString("tqr", cache.termQr);
   prefs.putString("tname", cache.termName);
   prefs.putLong("next", cache.next);
   prefs.putLong("to", cache.to);
@@ -309,6 +312,7 @@ void netHello() {
   cache.next = doc["block"]["from"] | 0L;
   cache.to = doc["block"]["to"] | 0L;
   cache.termId = (const char *)(doc["terminal"]["id"] | "");
+  cache.termQr = (const char *)(doc["terminal"]["qr"] | "");
   cache.termName = (const char *)(doc["terminal"]["name"] | "");
   S.serverNow = doc["now"] | 0LL;
   readStaff(doc);
@@ -432,6 +436,7 @@ void netReq() {
     if (sh.length()) cfg.shop = sh;
     S.user = (const char *)(doc["user"] | "");
     cache.termId = (const char *)(doc["term"] | "");
+    cache.termQr = "";  // the next hello gives the short label
     cache.termName = S.user;
     saveSettings();
     saveCache();
@@ -466,6 +471,7 @@ void netTask(void *) {
         cfg.token = "";
         S.user = "";
         cache.termId = "";
+        cache.termQr = "";
         saveSettings();
         saveCache();
         S.needHello = true;
@@ -1232,6 +1238,7 @@ void runPortal() {
   cfg.term.trim();
   if (cfg.term.isEmpty()) cfg.term = "Main counter";
   cache.termId = "";  // the server gives the id again at the next hello
+  cache.termQr = "";
   saveCache();
   saveSettings();
   ESP.restart();
@@ -1258,7 +1265,8 @@ void startSale(long amount, long tip = -1, const String &waiter = "") {
     S.ops.push_back(Op{OP_SALE, number, amount, tip, waiter});
     S.lastPollMs = millis();
   }
-  walletQr = meeza::saleQr(cache.qrBase.c_str(), amount, number, cache.termId.length() ? cache.termId.c_str() : "main");
+  walletQr = meeza::saleQr(cache.qrBase.c_str(), amount, number,
+                           cache.termQr.length() ? cache.termQr.c_str() : cache.termId.length() ? cache.termId.c_str() : "main");
   qrText = walletQr;
   showCard = false;
   showTransfer = false;
