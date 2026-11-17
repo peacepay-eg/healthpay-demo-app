@@ -38,7 +38,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.6.0"
+#define BOX_VERSION "0.7.0"
 #ifdef BOX_RESTAURANT
 static const bool RESTAURANT = true;
 #define BOX_KIND "Restaurant"
@@ -73,6 +73,7 @@ XPT2046_Touchscreen ts(33, 36);
 // ---------------------------------------------------------------- settings
 struct Settings {
   String url, key, shop, device, term;
+  String token;  // the login of the person using the box (mobile + PIN + SMS code)
   bool invert = false;
   int volume = 2;  // 1..3
   bool calOk = false;
@@ -92,6 +93,7 @@ void loadSettings() {
   cfg.key = prefs.getString("key", "");
   cfg.shop = prefs.getString("shop", "A");
   cfg.term = prefs.getString("term", "Main counter");
+  cfg.token = prefs.getString("token", "");
   cfg.invert = prefs.getBool("inv", false);
   cfg.volume = prefs.getInt("vol", 2);
   cfg.calOk = prefs.getBool("calok", false);
@@ -119,6 +121,7 @@ void saveSettings() {
   prefs.putString("key", cfg.key);
   prefs.putString("shop", cfg.shop);
   prefs.putString("term", cfg.term);
+  prefs.putString("token", cfg.token);
   prefs.putBool("inv", cfg.invert);
   prefs.putInt("vol", cfg.volume);
   prefs.putBool("calok", cfg.calOk);
@@ -205,7 +208,9 @@ struct Shared {
   std::vector<InItem> incoming;  // for the sale on screen
   std::vector<TodayItem> today;
   String mode;                   // standard, mixed or strict
-  bool signin = false;           // the shop's staff sign in with a PIN
+  bool signin = false;           // the shop's staff log in (mobile + PIN + SMS code)
+  bool signedOut = false;        // the server ended this box's login
+  String ticket, sentTo;         // login in progress
   String user;                   // who is signed in on this counter
   Req req;
   uint32_t lastPollMs = 0;
@@ -232,8 +237,11 @@ String httpGet(const String &query, int &code) {
   // The counter: its id once the server has told us (after hello), its name before.
   String term;
   { Lock l; term = cache.termId.length() ? cache.termId : cfg.term; }
+  String token;
+  { Lock l; token = cfg.token; }
   String url = cfg.url + "?type=box&key=" + cfg.key + "&shop=" + cfg.shop + "&device=" + cfg.device +
-               "&terminal=" + urlEncode(query.startsWith("action=hello") ? cfg.term : term) + "&" + query;
+               "&terminal=" + urlEncode(query.startsWith("action=hello") ? cfg.term : term) +
+               (token.length() && !query.startsWith("action=login") ? "&token=" + token : String("")) + "&" + query;
   if (!http.begin(client, url)) { code = -1; return ""; }
   code = http.GET();
   String body = code > 0 ? http.getString() : "";
@@ -255,6 +263,8 @@ bool callServer(const String &query, JsonDocument &doc) {
     Lock l;
     S.online = true;
     S.error = body.substring(7);
+    // The login ended (owner logged them out, shift closed, or too long unused).
+    if (S.error.startsWith("Signed out")) { S.signedOut = true; }
     return false;
   }
   if (deserializeJson(doc, body)) {
@@ -412,7 +422,19 @@ void netReq() {
   S.req.result = ok ? String((const char *)(doc["result"] | "")) : String("");
   S.req.msg = ok ? String("") : S.error;
   if (ok) readUser(doc);
-  if (ok && q.startsWith("action=signout")) S.user = "";
+  if (q.startsWith("action=logout")) S.signedOut = true;  // forget the login here, whatever the server said
+  if (ok && q.startsWith("action=login1")) { S.ticket = (const char *)(doc["ticket"] | ""); S.sentTo = (const char *)(doc["sentTo"] | ""); }
+  if (ok && q.startsWith("action=login2")) {
+    cfg.token = (const char *)(doc["token"] | "");
+    String sh = (const char *)(doc["shop"]["id"] | "");
+    if (sh.length()) cfg.shop = sh;
+    S.user = (const char *)(doc["user"] | "");
+    cache.termId = (const char *)(doc["term"] | "");
+    cache.termName = S.user;
+    saveSettings();
+    saveCache();
+    S.needHello = true;  // this person's shop, QR and payment point
+  }
   if (ok && q.startsWith("action=today")) {
     S.today.clear();
     for (JsonObject x : doc["sales"].as<JsonArray>()) {
@@ -434,6 +456,18 @@ void netTask(void *) {
       { Lock l; S.online = false; }
       vTaskDelay(pdMS_TO_TICKS(1000));
       continue;
+    }
+    {
+      Lock l;
+      if (S.signedOut) {
+        S.signedOut = false;
+        cfg.token = "";
+        S.user = "";
+        cache.termId = "";
+        saveSettings();
+        saveCache();
+        S.needHello = true;
+      }
     }
     bool hello;
     { Lock l; hello = S.needHello; }
@@ -730,7 +764,7 @@ void drawTop() {
 
 bool needSignIn() {
   Lock l;
-  return S.signin && S.user.isEmpty() && S.helloDone;
+  return S.signin && cfg.token.isEmpty() && S.helloDone;
 }
 
 void drawHome() {
@@ -881,7 +915,7 @@ void drawSettings() {
   button(SB_TEST, "Test voice", C_KEY, C_INK, 2);
   String u;
   { Lock l; u = S.user; }
-  button(SB_USER, u.length() ? ("Sign out " + u.substring(0, 8)).c_str() : "Switch user", C_KEY, C_INK, 2);
+  button(SB_USER, u.length() ? ("Log out " + u.substring(0, 9)).c_str() : "Log out", C_KEY, C_INK, 2);
   button(SB_BACK, "Back", C_ORANGE, TFT_WHITE, 2);
   String err, ip = WiFi.localIP().toString();
   bool online;
@@ -1069,33 +1103,43 @@ void drawToday() {
   }
 }
 
-// Staff sign-in: the counter is the till; the person signs in with a 4-digit PIN.
-String pinTyped = "";
+// Login: mobile number, then PIN, then the code sent by SMS (demo: 123456).
+// No device setup: the person's payments follow them to this box.
+enum LoginStep { LS_MOBILE, LS_PIN, LS_CODE };
+LoginStep loginStep = LS_MOBILE;
+String pinTyped = "", loginMobile = "";
+unsigned loginMax() { return loginStep == LS_MOBILE ? 11 : loginStep == LS_PIN ? 4 : 6; }
 void drawPinOnly() {
   tft.fillRect(0, 31, 320, 52, C_BG);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(C_INK, C_BG);
-  String dots;
-  for (unsigned i = 0; i < 4; i++) dots += i < pinTyped.length() ? "* " : "_ ";
-  tft.drawString(dots, 8, 50, 4);
+  String shown = pinTyped;
+  if (loginStep == LS_PIN) { shown = ""; for (unsigned i = 0; i < 4; i++) shown += i < pinTyped.length() ? "* " : "_ "; }
+  tft.drawString(shown.length() ? shown : String("-"), 8, 50, 4);
+  String sentTo;
+  { Lock l; sentTo = S.sentTo; }
   if (noteOn()) { tft.setTextColor(C_RED, C_BG); tft.drawString(note.substring(0, 44), 8, 74, 2); }
   else if (reqBusy()) { tft.setTextColor(C_MUTED, C_BG); tft.drawString("Checking...", 8, 74, 2); }
-  else { tft.setTextColor(C_MUTED, C_BG); tft.drawString("Payments are still announced", 8, 74, 2); }
+  else {
+    tft.setTextColor(C_MUTED, C_BG);
+    tft.drawString(loginStep == LS_CODE ? "Code sent to " + sentTo + " (demo 123456)" : String("Payments are still announced"), 8, 74, 2);
+  }
+  bool ok = pinTyped.length() == loginMax();
+  button(BTN_QR, "OK", ok ? C_ORANGE : C_LINE, TFT_WHITE, 4);
 }
 void drawSignIn() {
   tft.fillScreen(C_BG);
   tft.fillRect(0, 0, 320, 30, C_ORANGE);
   tft.setTextColor(TFT_WHITE, C_ORANGE);
   tft.setTextDatum(ML_DATUM);
-  String counter;
-  { Lock l; counter = cache.termName.length() ? cache.termName : cfg.term; }
-  tft.drawString("Sign in with your PIN - " + counter, 8, 15, 2);
-  drawPinOnly();
+  tft.drawString(loginStep == LS_MOBILE ? "Log in: your mobile number" : loginStep == LS_PIN ? "Log in: your PIN" : "Log in: the SMS code", 8, 15, 2);
+  if (loginStep != LS_MOBILE) { tft.setTextDatum(MR_DATUM); tft.drawString("Back", 312, 15, 2); }
   for (int r = 0; r < 4; r++)
     for (int c = 0; c < 4; c++) {
       if (!DKEYS[r][c][0]) continue;
       button(keyBtn(r, c), DKEYS[r][c], C_KEY, C_INK, strlen(DKEYS[r][c]) > 2 ? 2 : 4);
     }
+  drawPinOnly();
 }
 
 void openEntry(Entry k) {
@@ -1322,7 +1366,8 @@ void loop() {
   if (rdone) {
     if (!rok) {
       setNote(rmsg.length() ? rmsg : String("Not sent: check the connection"));
-      if (rq.startsWith("action=signin")) pinTyped = "";
+      if (rq.startsWith("action=login")) pinTyped = "";
+      if (rq.startsWith("action=login2") && rmsg.indexOf("start again") >= 0) loginStep = LS_MOBILE;
     } else if (rq.startsWith("action=claim")) {
       if (rres == "paid") { setNote("Found. Confirming...", 3000); screen = SCR_QR; }
       else if (rres == "need_full") { entryMax = 11; entry = ""; setNote("Two numbers end the same: enter his full number"); }
@@ -1334,14 +1379,17 @@ void loop() {
     } else if (rq.startsWith("action=buyer")) {
       setNote(rres == "paid" ? String("Found his payment. Confirming...") : String("Saved: his transfer will match this bill"), 6000);
       screen = SCR_QR;
-    } else if (rq.startsWith("action=signin")) {
+    } else if (rq.startsWith("action=login1")) {
+      pinTyped = "";
+      loginStep = LS_CODE;
+    } else if (rq.startsWith("action=login2")) {
       String u;
       { Lock l; u = S.user; }
-      pinTyped = "";
-      toast = "Signed in: " + u; toastUntil = millis() + 4000;
+      pinTyped = ""; loginStep = LS_MOBILE; loginMobile = "";
+      toast = "Logged in: " + u; toastUntil = millis() + 4000;
       screen = SCR_HOME;
-    } else if (rq.startsWith("action=signout")) {
-      pinTyped = "";
+    } else if (rq.startsWith("action=logout")) {
+      pinTyped = ""; loginStep = LS_MOBILE;
       screen = SCR_SIGNIN;
     } else if (rq.startsWith("action=tip")) {
       Lock l;
@@ -1353,7 +1401,7 @@ void loop() {
     dirty = true;
   }
   // Sign-in needed: the home screen becomes the PIN pad (and back once signed in).
-  if (screen == SCR_HOME && needSignIn()) { screen = SCR_SIGNIN; pinTyped = ""; dirty = true; }
+  if (screen == SCR_HOME && needSignIn()) { screen = SCR_SIGNIN; pinTyped = ""; loginStep = LS_MOBILE; dirty = true; }
   if (screen == SCR_SIGNIN && !needSignIn() && !reqBusy()) { screen = SCR_HOME; dirty = true; }
   // Notes expire: redraw once when they do.
   static bool noteShown = false;
@@ -1516,15 +1564,26 @@ void loop() {
     dirty = true;
   } else if (screen == SCR_SIGNIN) {
     if (reqBusy()) return;
+    if (loginStep != LS_MOBILE && BTN_BACKBAR.hit(x, y)) { loginStep = LS_MOBILE; pinTyped = ""; note = ""; dirty = true; return; }
+    if (BTN_QR.hit(x, y)) {
+      if (pinTyped.length() != loginMax()) return;
+      note = "";
+      if (loginStep == LS_MOBILE) { loginMobile = pinTyped; pinTyped = ""; loginStep = LS_PIN; dirty = true; return; }
+      String ticket;
+      { Lock l; ticket = S.ticket; }
+      if (loginStep == LS_PIN) sendReq("action=login1&mobile=" + loginMobile + "&pin=" + pinTyped);
+      else sendReq("action=login2&ticket=" + urlEncode(ticket) + "&code=" + pinTyped);
+      drawPinOnly();
+      return;
+    }
     for (int r = 0; r < 4; r++)
       for (int c = 0; c < 4; c++) {
         const char *k = DKEYS[r][c];
         if (!k[0] || !keyBtn(r, c).hit(x, y)) continue;
         if (!strcmp(k, "Del")) { if (pinTyped.length()) pinTyped.remove(pinTyped.length() - 1); }
         else if (!strcmp(k, "Clear")) pinTyped = "";
-        else if (pinTyped.length() < 4) pinTyped += k;
+        else if (pinTyped.length() < loginMax()) pinTyped += k;
         note = "";
-        if (pinTyped.length() == 4) sendReq("action=signin&pin=" + pinTyped);
         drawPinOnly();
         return;
       }
@@ -1572,7 +1631,11 @@ void loop() {
     else if (SB_INV.hit(x, y)) { cfg.invert = !cfg.invert; tft.invertDisplay(cfg.invert); saveSettings(); dirty = true; }
     else if (SB_VOL.hit(x, y)) { cfg.volume = cfg.volume % 3 + 1; saveSettings(); say(words::received(50, "620")); dirty = true; }
     else if (SB_TEST.hit(x, y)) say(words::received(1250, "620"));
-    else if (SB_USER.hit(x, y)) { sendReq("action=signout"); screen = SCR_HOME; dirty = true; }
+    else if (SB_USER.hit(x, y)) {
+      // Log out here and on the server; this box then asks the next person to log in.
+      sendReq("action=logout");
+      screen = SCR_HOME; dirty = true;
+    }
     else if (SB_BACK.hit(x, y)) { screen = SCR_HOME; dirty = true; }
   }
 }
