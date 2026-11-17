@@ -38,7 +38,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.7.0"
+#define BOX_VERSION "0.7.1"
 #ifdef BOX_RESTAURANT
 static const bool RESTAURANT = true;
 #define BOX_KIND "Restaurant"
@@ -211,6 +211,7 @@ struct Shared {
   bool signin = false;           // the shop's staff log in (mobile + PIN + SMS code)
   bool signedOut = false;        // the server ended this box's login
   String ticket, sentTo;         // login in progress
+  String wallet;                 // the shop's wallet number (transfers and USSD)
   String user;                   // who is signed in on this counter
   Req req;
   uint32_t lastPollMs = 0;
@@ -304,6 +305,7 @@ void netHello() {
   Lock l;
   cache.shopName = doc["shop"]["name"] | cache.shopName.c_str();
   cache.qrBase = doc["qrBase"] | "";
+  S.wallet = (const char *)(doc["wallet"] | "");
   cache.next = doc["block"]["from"] | 0L;
   cache.to = doc["block"]["to"] | 0L;
   cache.termId = (const char *)(doc["terminal"]["id"] | "");
@@ -339,7 +341,7 @@ void netOps() {
   JsonDocument doc;
   String q = op.kind == OP_SALE ? "action=sale&number=" + String(op.number) + "&amount=" + String(op.amount)
                                 : "action=cancel&number=" + String(op.number);
-  if (op.kind == OP_SALE && op.tip > 0) q += "&tip=" + String(op.tip);
+  if (op.kind == OP_SALE && op.tip >= 0) q += "&tip=" + String(op.tip);  // -1: no tip asked (shop)
   if (op.kind == OP_SALE && op.waiter.length()) q += "&waiter=" + urlEncode(op.waiter);
   bool ok = callServer(q, doc);
   Lock l;
@@ -703,6 +705,7 @@ String waiterId = "", waiterLabel = "";
 long tipChoice[3] = {1, 2, 5};
 // Cashier tools for the sale on screen.
 bool showCard = false;          // the QR shows the card page instead of the wallet code
+bool showTransfer = false;      // the number to transfer to, InstaPay and USSD codes
 std::string walletQr;           // the sale's wallet (Meeza) code
 enum Entry { EN_CLAIM, EN_BUYER, EN_CASHTIP };
 Entry entryKind = EN_CLAIM;
@@ -803,15 +806,37 @@ String cardUrl() {
   return id.length() ? cfg.url + "?page=pay&sale=" + id : String("");
 }
 
+// The "Transfer" view: the wallet number, InstaPay and the USSD codes with the amount.
+void drawTransfer(long amount) {
+  String num;
+  { Lock l; num = S.wallet; }
+  tft.setTextColor(C_INK, TFT_WHITE);
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString("Transfer " + money(amount) + " EGP to:", 8, 8, 2);
+  String spaced = num.length() == 11 ? num.substring(0, 4) + " " + num.substring(4, 7) + " " + num.substring(7) : num;
+  tft.drawString(num.length() ? spaced : String("(number not set)"), 8, 30, 4);
+  tft.setTextColor(C_MUTED, TFT_WHITE);
+  tft.drawString("InstaPay: send to this number", 8, 70, 2);
+  tft.drawString("No smartphone? Dial:", 8, 98, 2);
+  tft.setTextColor(C_INK, TFT_WHITE);
+  tft.drawString("Orange: #115# > Transfer", 8, 120, 2);
+  tft.drawString("Vodafone: *9*7*" + num + "*" + String(amount) + "#", 8, 142, 2);
+  tft.drawString("e&: *777*1# > number > amount", 8, 164, 2);
+}
+
 void drawQr() {
   static uint8_t q[hpqr_BUFFER_LEN_FOR_VERSION(14)], tmp[hpqr_BUFFER_LEN_FOR_VERSION(14)];
   tft.fillScreen(C_BG);
   tft.fillRect(0, 0, 234, 240, TFT_WHITE);
+  long amount0;
+  { Lock l; amount0 = S.sale.amount; }
+  if (showTransfer) { drawTransfer(amount0); }
   String card = showCard ? cardUrl() : String("");
   if (showCard && card.length()) qrText = card.c_str();
   else { showCard = false; qrText = walletQr; }
-  bool ok = hpqr_encodeText(qrText.c_str(), tmp, q, hpqr_Ecc_MEDIUM, hpqr_VERSION_MIN, 14, hpqr_Mask_AUTO, true);
-  if (ok) {
+  bool ok = !showTransfer && hpqr_encodeText(qrText.c_str(), tmp, q, hpqr_Ecc_MEDIUM, hpqr_VERSION_MIN, 14, hpqr_Mask_AUTO, true);
+  if (showTransfer) {
+  } else if (ok) {
     int n = hpqr_getSize(q);
     int scale = 226 / (n + 4);
     if (scale < 1) scale = 1;
@@ -837,9 +862,10 @@ void drawQr() {
   if (tip > 0) { tft.setTextColor(C_GREEN_DARK, C_BG); tft.drawString("Tip " + money(tip), 240, 86, 2); tft.setTextColor(C_MUTED, C_BG); }
   // Above the code: what to scan it with, or a cashier message.
   tft.setTextDatum(MC_DATUM);
-  if (noteOn()) { tft.setTextColor(C_RED, TFT_WHITE); tft.drawString(note.substring(0, 34), 117, 10, 2); }
-  else { tft.setTextColor(C_MUTED, TFT_WHITE); tft.drawString(showCard ? "Card: scan with the phone camera" : "Scan with any wallet app", 117, 10, 2); }
-  button(BTN_TOGGLE, showCard ? "Wallet" : "Card", C_KEY, C_INK, 2);
+  if (noteOn()) { tft.setTextColor(C_RED, TFT_WHITE); tft.drawString(note.substring(0, 34), 117, showTransfer ? 220 : 10, 2); }
+  else if (!showTransfer) { tft.setTextColor(C_MUTED, TFT_WHITE); tft.drawString(showCard ? "Card: scan with the phone camera" : "Scan with any wallet app", 117, 10, 2); }
+  // Wallet -> Card -> Transfer -> Wallet
+  button(BTN_TOGGLE, showTransfer ? "Wallet" : showCard ? "Transfer" : "Card", C_KEY, C_INK, 2);
   button(BTN_MORE, "More", C_KEY, C_INK, 2);
   button(BTN_CANCEL, "Cancel", C_KEY, C_INK, 2);
 }
@@ -946,7 +972,7 @@ void drawWaiter() {
 }
 
 // Restaurant: the buyer picks a tip (turn the box to the buyer)
-Btn tipBtn(int i) { return Btn{8 + (i % 2) * 156, 92 + (i / 2) * 72, 148, 64}; }
+Btn tipBtn(int i) { return i == 0 ? Btn{8, 168, 304, 66} : Btn{8 + (i - 1) * 104, 94, 96, 66}; }
 const Btn TB_BACK{232, 0, 88, 30};
 
 void tipButton(int i, const String &big, const String &small) {
@@ -956,8 +982,8 @@ void tipButton(int i, const String &big, const String &small) {
   tft.fillRoundRect(b.x, b.y, b.w, b.h, 10, bg);
   tft.setTextColor(fg, bg);
   tft.setTextDatum(MC_DATUM);
-  tft.drawString(big, b.x + b.w / 2, b.y + 22, 4);
-  tft.drawString(small, b.x + b.w / 2, b.y + 48, 2);
+  tft.drawString(big, b.x + b.w / 2, small.length() ? b.y + 22 : b.y + b.h / 2, 4);
+  if (small.length()) tft.drawString(small, b.x + b.w / 2, b.y + 50, 2);
 }
 
 void drawTip() {
@@ -974,8 +1000,8 @@ void drawTip() {
   tft.drawString("Bill " + money(billAmount) + " EGP", 8, 52, 4);
   tft.setTextColor(C_MUTED, C_BG);
   tft.drawString(waiterLabel.length() ? "Served by " + waiterLabel : String("Thank you for visiting"), 8, 78, 2);
-  tipButton(0, "No tip", "Pay " + money(billAmount));
-  for (int i = 0; i < 3; i++) tipButton(i + 1, "+" + money(tipChoice[i]), "Pay " + money(billAmount + tipChoice[i]));
+  tipButton(0, "No thanks", "");
+  for (int i = 0; i < 3; i++) tipButton(i + 1, "+" + money(tipChoice[i]), "Total " + money(billAmount + tipChoice[i]));
 }
 
 // Cashier tools: a dark title bar with Back on the right.
@@ -1212,7 +1238,7 @@ void runPortal() {
 }
 
 // ---------------------------------------------------------------- sale flow
-void startSale(long amount, long tip = 0, const String &waiter = "") {
+void startSale(long amount, long tip = -1, const String &waiter = "") {
   long number;
   {
     Lock l;
@@ -1227,7 +1253,7 @@ void startSale(long amount, long tip = 0, const String &waiter = "") {
     S.sale = SaleView();
     S.sale.number = number;
     S.sale.amount = amount;
-    S.sale.tip = tip;
+    S.sale.tip = tip > 0 ? tip : 0;
     S.sale.status = "waiting";
     S.ops.push_back(Op{OP_SALE, number, amount, tip, waiter});
     S.lastPollMs = millis();
@@ -1235,6 +1261,7 @@ void startSale(long amount, long tip = 0, const String &waiter = "") {
   walletQr = meeza::saleQr(cache.qrBase.c_str(), amount, number, cache.termId.length() ? cache.termId.c_str() : "main");
   qrText = walletQr;
   showCard = false;
+  showTransfer = false;
   note = "";
   screen = SCR_QR;
   dirty = true;
@@ -1498,8 +1525,10 @@ void loop() {
       screen = SCR_HOME;
       dirty = true;
     } else if (BTN_TOGGLE.hit(x, y)) {
-      if (!showCard && !known) { setNote("Saving the sale... try again in a moment", 3000); dirty = true; return; }
-      showCard = !showCard;
+      if (showTransfer) { showTransfer = false; showCard = false; }
+      else if (showCard) { showCard = false; showTransfer = true; }
+      else if (known) showCard = true;
+      else showTransfer = true;  // the card page needs the sale on the server first
       dirty = true;
     } else if (BTN_MORE.hit(x, y)) {
       if (!known) { setNote("Saving the sale... try again in a moment", 3000); dirty = true; return; }
