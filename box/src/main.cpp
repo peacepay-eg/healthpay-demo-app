@@ -38,7 +38,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.5.0"
+#define BOX_VERSION "0.6.0"
 #ifdef BOX_RESTAURANT
 static const bool RESTAURANT = true;
 #define BOX_KIND "Restaurant"
@@ -205,6 +205,8 @@ struct Shared {
   std::vector<InItem> incoming;  // for the sale on screen
   std::vector<TodayItem> today;
   String mode;                   // standard, mixed or strict
+  bool signin = false;           // the shop's staff sign in with a PIN
+  String user;                   // who is signed in on this counter
   Req req;
   uint32_t lastPollMs = 0;
 } S;
@@ -267,6 +269,12 @@ bool callServer(const String &query, JsonDocument &doc) {
   return true;
 }
 
+// Staff sign-in state (called with the lock held).
+void readUser(JsonDocument &doc) {
+  if (doc["signin"].is<bool>()) S.signin = doc["signin"] | false;
+  if (doc["user"].is<const char *>()) S.user = (const char *)(doc["user"] | "");
+}
+
 // Restaurant: whether tips are on, and who is on shift (called with the lock held).
 void readStaff(JsonDocument &doc) {
   if (!doc["tips"].is<bool>()) return;
@@ -292,6 +300,7 @@ void netHello() {
   cache.termName = (const char *)(doc["terminal"]["name"] | "");
   S.serverNow = doc["now"] | 0LL;
   readStaff(doc);
+  readUser(doc);
   if (!S.since) S.since = S.serverNow;
   S.helloDone = true;
   S.needHello = false;
@@ -353,6 +362,7 @@ void netPoll() {
   Lock l;
   S.serverNow = doc["now"] | S.serverNow;
   readStaff(doc);
+  readUser(doc);
   for (JsonObject s : doc["sales"].as<JsonArray>()) {
     if ((long)(s["number"] | 0L) != S.sale.number) continue;
     S.sale.status = (const char *)(s["status"] | "");
@@ -401,6 +411,8 @@ void netReq() {
   S.req.ok = ok;
   S.req.result = ok ? String((const char *)(doc["result"] | "")) : String("");
   S.req.msg = ok ? String("") : S.error;
+  if (ok) readUser(doc);
+  if (ok && q.startsWith("action=signout")) S.user = "";
   if (ok && q.startsWith("action=today")) {
     S.today.clear();
     for (JsonObject x : doc["sales"].as<JsonArray>()) {
@@ -644,7 +656,7 @@ void drawTick(int cx, int cy, int r, uint16_t c) {
 
 // ---------------------------------------------------------------- screens
 enum Screen { SCR_HOME, SCR_QR, SCR_RESULT, SCR_SETTINGS, SCR_WAITER, SCR_TIP,
-              SCR_MORE, SCR_DIGITS, SCR_INCOMING, SCR_CONFIRM, SCR_TODAY };
+              SCR_MORE, SCR_DIGITS, SCR_INCOMING, SCR_CONFIRM, SCR_TODAY, SCR_SIGNIN };
 Screen screen = SCR_HOME;
 bool dirty = true;
 String typed = "";
@@ -710,8 +722,15 @@ void drawTop() {
     return;
   }
   tft.setTextDatum(MR_DATUM);
+  String user;
+  { Lock l; user = S.user; }
   tft.fillCircle(240, 15, 5, online ? C_GREEN : C_RED);
-  tft.drawString(online ? "Online" : "Offline", 312, 15, 2);
+  tft.drawString(!online ? String("Offline") : user.length() ? user.substring(0, 9) : String("Online"), 312, 15, 2);
+}
+
+bool needSignIn() {
+  Lock l;
+  return S.signin && S.user.isEmpty() && S.helloDone;
 }
 
 void drawHome() {
@@ -845,8 +864,8 @@ void drawResult() {
 }
 
 // Settings
-const Btn SB_WIFI{8, 40, 148, 44}, SB_CAL{164, 40, 148, 44}, SB_INV{8, 92, 148, 44}, SB_VOL{164, 92, 148, 44},
-    SB_TEST{8, 144, 148, 44}, SB_BACK{164, 144, 148, 44};
+const Btn SB_WIFI{8, 36, 148, 36}, SB_CAL{164, 36, 148, 36}, SB_INV{8, 78, 148, 36}, SB_VOL{164, 78, 148, 36},
+    SB_TEST{8, 120, 148, 36}, SB_USER{164, 120, 148, 36}, SB_BACK{8, 160, 304, 32};
 
 void drawSettings() {
   tft.fillScreen(C_BG);
@@ -860,6 +879,9 @@ void drawSettings() {
   String v = "Volume: " + String(cfg.volume);
   button(SB_VOL, v.c_str(), C_KEY, C_INK, 2);
   button(SB_TEST, "Test voice", C_KEY, C_INK, 2);
+  String u;
+  { Lock l; u = S.user; }
+  button(SB_USER, u.length() ? ("Sign out " + u.substring(0, 8)).c_str() : "Switch user", C_KEY, C_INK, 2);
   button(SB_BACK, "Back", C_ORANGE, TFT_WHITE, 2);
   String err, ip = WiFi.localIP().toString();
   bool online;
@@ -1045,6 +1067,35 @@ void drawToday() {
     tft.setTextColor(c, C_BG);
     tft.drawString(st == "paid" ? "Paid" : st == "waiting" ? "Waiting" : st == "expired" ? "Expired" : st == "cancelled" ? "Cancelled" : "Check", 312, y, 2);
   }
+}
+
+// Staff sign-in: the counter is the till; the person signs in with a 4-digit PIN.
+String pinTyped = "";
+void drawPinOnly() {
+  tft.fillRect(0, 31, 320, 52, C_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(C_INK, C_BG);
+  String dots;
+  for (unsigned i = 0; i < 4; i++) dots += i < pinTyped.length() ? "* " : "_ ";
+  tft.drawString(dots, 8, 50, 4);
+  if (noteOn()) { tft.setTextColor(C_RED, C_BG); tft.drawString(note.substring(0, 44), 8, 74, 2); }
+  else if (reqBusy()) { tft.setTextColor(C_MUTED, C_BG); tft.drawString("Checking...", 8, 74, 2); }
+  else { tft.setTextColor(C_MUTED, C_BG); tft.drawString("Payments are still announced", 8, 74, 2); }
+}
+void drawSignIn() {
+  tft.fillScreen(C_BG);
+  tft.fillRect(0, 0, 320, 30, C_ORANGE);
+  tft.setTextColor(TFT_WHITE, C_ORANGE);
+  tft.setTextDatum(ML_DATUM);
+  String counter;
+  { Lock l; counter = cache.termName.length() ? cache.termName : cfg.term; }
+  tft.drawString("Sign in with your PIN - " + counter, 8, 15, 2);
+  drawPinOnly();
+  for (int r = 0; r < 4; r++)
+    for (int c = 0; c < 4; c++) {
+      if (!DKEYS[r][c][0]) continue;
+      button(keyBtn(r, c), DKEYS[r][c], C_KEY, C_INK, strlen(DKEYS[r][c]) > 2 ? 2 : 4);
+    }
 }
 
 void openEntry(Entry k) {
@@ -1257,6 +1308,7 @@ void loop() {
     else if (screen == SCR_INCOMING) drawIncoming();
     else if (screen == SCR_CONFIRM) drawConfirm();
     else if (screen == SCR_TODAY) drawToday();
+    else if (screen == SCR_SIGNIN) drawSignIn();
   }
 
   // A cashier request was answered.
@@ -1270,6 +1322,7 @@ void loop() {
   if (rdone) {
     if (!rok) {
       setNote(rmsg.length() ? rmsg : String("Not sent: check the connection"));
+      if (rq.startsWith("action=signin")) pinTyped = "";
     } else if (rq.startsWith("action=claim")) {
       if (rres == "paid") { setNote("Found. Confirming...", 3000); screen = SCR_QR; }
       else if (rres == "need_full") { entryMax = 11; entry = ""; setNote("Two numbers end the same: enter his full number"); }
@@ -1281,6 +1334,15 @@ void loop() {
     } else if (rq.startsWith("action=buyer")) {
       setNote(rres == "paid" ? String("Found his payment. Confirming...") : String("Saved: his transfer will match this bill"), 6000);
       screen = SCR_QR;
+    } else if (rq.startsWith("action=signin")) {
+      String u;
+      { Lock l; u = S.user; }
+      pinTyped = "";
+      toast = "Signed in: " + u; toastUntil = millis() + 4000;
+      screen = SCR_HOME;
+    } else if (rq.startsWith("action=signout")) {
+      pinTyped = "";
+      screen = SCR_SIGNIN;
     } else if (rq.startsWith("action=tip")) {
       Lock l;
       if (rq.indexOf("kind=extra") > 0) { S.sale.tip += S.sale.diff; S.sale.diff = 0; }
@@ -1290,6 +1352,9 @@ void loop() {
     }
     dirty = true;
   }
+  // Sign-in needed: the home screen becomes the PIN pad (and back once signed in).
+  if (screen == SCR_HOME && needSignIn()) { screen = SCR_SIGNIN; pinTyped = ""; dirty = true; }
+  if (screen == SCR_SIGNIN && !needSignIn() && !reqBusy()) { screen = SCR_HOME; dirty = true; }
   // Notes expire: redraw once when they do.
   static bool noteShown = false;
   if (noteShown && !noteOn() && screen != SCR_HOME) dirty = true;
@@ -1332,7 +1397,7 @@ void loop() {
   // Long press on the top bar opens the settings.
   static uint32_t topPressSince = 0;
   int px, py;
-  if (readTouch(px, py) && BTN_TOP.hit(px, py) && (screen == SCR_HOME)) {
+  if (readTouch(px, py) && BTN_TOP.hit(px, py) && (screen == SCR_HOME || screen == SCR_SIGNIN)) {
     if (!topPressSince) topPressSince = millis();
     if (millis() - topPressSince > 2000) {
       topPressSince = 0;
@@ -1449,6 +1514,20 @@ void loop() {
   } else if (screen == SCR_TODAY) {
     screen = SCR_HOME;
     dirty = true;
+  } else if (screen == SCR_SIGNIN) {
+    if (reqBusy()) return;
+    for (int r = 0; r < 4; r++)
+      for (int c = 0; c < 4; c++) {
+        const char *k = DKEYS[r][c];
+        if (!k[0] || !keyBtn(r, c).hit(x, y)) continue;
+        if (!strcmp(k, "Del")) { if (pinTyped.length()) pinTyped.remove(pinTyped.length() - 1); }
+        else if (!strcmp(k, "Clear")) pinTyped = "";
+        else if (pinTyped.length() < 4) pinTyped += k;
+        note = "";
+        if (pinTyped.length() == 4) sendReq("action=signin&pin=" + pinTyped);
+        drawPinOnly();
+        return;
+      }
   } else if (screen == SCR_RESULT) {
     if (tipsOn()) {
       long diff, number;
@@ -1493,6 +1572,7 @@ void loop() {
     else if (SB_INV.hit(x, y)) { cfg.invert = !cfg.invert; tft.invertDisplay(cfg.invert); saveSettings(); dirty = true; }
     else if (SB_VOL.hit(x, y)) { cfg.volume = cfg.volume % 3 + 1; saveSettings(); say(words::received(50, "620")); dirty = true; }
     else if (SB_TEST.hit(x, y)) say(words::received(1250, "620"));
+    else if (SB_USER.hit(x, y)) { sendReq("action=signout"); screen = SCR_HOME; dirty = true; }
     else if (SB_BACK.hit(x, y)) { screen = SCR_HOME; dirty = true; }
   }
 }
