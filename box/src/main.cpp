@@ -38,7 +38,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.4.0"
+#define BOX_VERSION "0.4.1"
 #ifdef BOX_RESTAURANT
 static const bool RESTAURANT = true;
 #define BOX_KIND "Restaurant"

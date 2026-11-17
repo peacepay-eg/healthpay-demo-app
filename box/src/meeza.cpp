@@ -84,7 +84,7 @@ std::string saleQr(const std::string &base, long amountEgp, long bill, const std
     else if (tag == "58") out += tlv("54", amt) + tlv("58", t.second);
     else out += tlv(tag, t.second);
   }
-  out += tlv("62", extra + tlv("01", billS) + (terminal.empty() ? std::string() : tlv("07", termLabel(terminal))));
+  out += tlv("62", extra + tlv("01", billS) + tlv("05", billS) + (terminal.empty() ? std::string() : tlv("07", termLabel(terminal))));
   out += "6304";
   return out + crc16(out);
 }
