@@ -37,7 +37,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.8.2"
+#define BOX_VERSION "0.8.3"
 static const bool RESTAURANT = true;  // restaurant features follow the server's business type
 #define BOX_KIND "Shop+Cafe"
 #ifndef BOX_BOARD
@@ -879,7 +879,7 @@ void drawQr() {
   tft.drawString("EGP", 240, 78, 2);
   tft.drawString("Bill " + String(number), 240, 94, 2);
   if (tip > 0) { tft.setTextColor(C_GREEN_DARK, C_BG); tft.drawString("Tip " + money(tip), 240, 108, 1); tft.setTextColor(C_MUTED, C_BG); }
-  button(BTN_MORE, "More", C_KEY, C_INK, 2);
+  drawIncomingBtn();
   // A cashier message, in three short lines under More.
   if (noteOn()) {
     tft.setTextColor(C_RED, C_BG);
@@ -890,6 +890,16 @@ void drawQr() {
     }
   }
   button(BTN_CANCEL, "Cancel", C_KEY, C_INK, 2);
+}
+
+// "Check (n)": shown only when transfers that could belong to this sale are waiting
+// for the cashier (two same-amount payments, or a manual wallet or USSD transfer).
+// Payments that match by themselves are announced and need nothing.
+void drawIncomingBtn() {
+  size_t n;
+  { Lock l; n = S.incoming.size(); }
+  tft.fillRect(BTN_MORE.x, BTN_MORE.y, BTN_MORE.w, BTN_MORE.h, C_BG);
+  if (n) button(BTN_MORE, ("Check " + String(n)).c_str(), C_ORANGE, TFT_WHITE, 2);
 }
 
 void drawQrStatus() {
@@ -1084,8 +1094,8 @@ void drawIncoming() {
   tft.setTextDatum(ML_DATUM);
   if (inc.empty()) {
     tft.setTextColor(C_MUTED, C_BG);
-    tft.drawString("Nothing yet. A transfer shows here", 8, 60, 2);
-    tft.drawString("within seconds of its SMS.", 8, 78, 2);
+    tft.drawString("Nothing to check now.", 8, 60, 2);
+    tft.drawString("Tap the bar above to go back.", 8, 78, 2);
   }
   for (size_t i = 0; i < inc.size() && i < 4; i++) {
     Btn b = rowBtn(i);
@@ -1100,7 +1110,7 @@ void drawIncoming() {
   if (mode == "mixed") {
     tft.setTextColor(C_MUTED, C_BG);
     tft.setTextDatum(ML_DATUM);
-    tft.drawString("InstaPay: More > last 3 digits", 8, 232, 1);
+    tft.drawString("InstaPay: use the InstaPay tab > his last 3 digits", 8, 232, 1);
   }
 }
 
@@ -1482,6 +1492,12 @@ void loop() {
     lastInc = n;
   }
   if (screen == SCR_QR) {
+    static size_t lastQrInc = 99;
+    size_t n;
+    { Lock l; n = S.incoming.size(); }
+    if (n != lastQrInc) { drawIncomingBtn(); lastQrInc = n; }
+  }
+  if (screen == SCR_QR) {
     static String lastLine;
     String status;
     bool reg;
@@ -1567,8 +1583,10 @@ void loop() {
       if (!known) { setNote("Saving the sale... try again in a moment", 3000); dirty = true; return; }
       openEntry(EN_CLAIM);
     } else if (BTN_MORE.hit(x, y)) {
-      if (!known) { setNote("Saving the sale... try again in a moment", 3000); dirty = true; return; }
-      screen = SCR_MORE;
+      size_t n;
+      { Lock l; n = S.incoming.size(); }
+      if (!n || !known) return;
+      screen = SCR_INCOMING;
       dirty = true;
     }
   } else if (screen == SCR_MORE) {
@@ -1604,7 +1622,7 @@ void loop() {
         return;
       }
   } else if (screen == SCR_INCOMING) {
-    if (BTN_BACKBAR.hit(x, y)) { screen = SCR_MORE; dirty = true; return; }
+    if (BTN_BACKBAR.hit(x, y)) { screen = SCR_QR; dirty = true; return; }
     size_t n;
     { Lock l; n = S.incoming.size(); }
     for (size_t i = 0; i < n && i < 4; i++)
