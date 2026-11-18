@@ -38,7 +38,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.7.2"
+#define BOX_VERSION "0.8.0"
 #ifdef BOX_RESTAURANT
 static const bool RESTAURANT = true;
 #define BOX_KIND "Restaurant"
@@ -791,7 +791,7 @@ void drawHome() {
       button(keyBtn(r, c), KEYS[r][c], C_KEY, C_INK, word ? 2 : 4);
     }
   bool ok = typed.toInt() > 0;
-  button(BTN_QR, tipsOn() ? "Next" : "QR", ok ? C_ORANGE : C_LINE, TFT_WHITE, 4);
+  button(BTN_QR, "Pay", ok ? C_ORANGE : C_LINE, TFT_WHITE, 4);
 }
 
 void drawAmountOnly() {
@@ -800,11 +800,13 @@ void drawAmountOnly() {
   tft.setTextColor(C_INK, C_BG);
   tft.drawString(typed.length() ? money(typed.toInt()) : String("0"), 270, 58, 6);
   bool ok = typed.toInt() > 0;
-  button(BTN_QR, tipsOn() ? "Next" : "QR", ok ? C_ORANGE : C_LINE, TFT_WHITE, 4);
+  button(BTN_QR, "Pay", ok ? C_ORANGE : C_LINE, TFT_WHITE, 4);
 }
 
 std::string qrText;
-const Btn BTN_TOGGLE{238, 104, 78, 32}, BTN_MORE{238, 140, 78, 32}, BTN_CANCEL{238, 200, 78, 36};
+// Payment screen: three tabs on top (Wallet, Card, InstaPay), the code or the number on the left, the amount on the right.
+const Btn TAB_W{0, 0, 106, 30}, TAB_C{107, 0, 106, 30}, TAB_I{214, 0, 106, 30};
+const Btn BTN_MORE{238, 124, 78, 30}, BTN_CANCEL{238, 202, 78, 34}, BTN_DIGITS{8, 112, 218, 40};
 
 String cardUrl() {
   String id;
@@ -814,26 +816,36 @@ String cardUrl() {
 
 // The "Transfer" view: the wallet number, InstaPay and the USSD codes with the amount.
 void drawTransfer(long amount) {
-  String num;
+  String num, claim;
   { Lock l; num = S.wallet; }
   tft.setTextColor(C_INK, TFT_WHITE);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Transfer " + money(amount) + " EGP to:", 8, 8, 2);
+  tft.drawString("Send " + money(amount) + " EGP by InstaPay to:", 8, 38, 2);
   String spaced = num.length() == 11 ? num.substring(0, 4) + " " + num.substring(4, 7) + " " + num.substring(7) : num;
-  tft.drawString(num.length() ? spaced : String("(number not set)"), 8, 30, 4);
+  tft.drawString(num.length() ? spaced : String("(number not set)"), 8, 58, 4);
   tft.setTextColor(C_MUTED, TFT_WHITE);
-  tft.drawString("InstaPay: send to this number", 8, 70, 2);
-  tft.drawString("No smartphone? Dial:", 8, 98, 2);
+  tft.drawString("Orange Cash wallet", 8, 88, 2);
+  button(BTN_DIGITS, "His last 3 digits", C_ORANGE, TFT_WHITE, 2);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(C_MUTED, TFT_WHITE);
+  tft.drawString("No smartphone? Dial:", 8, 160, 2);
   tft.setTextColor(C_INK, TFT_WHITE);
-  tft.drawString("Orange: #115# > Transfer", 8, 120, 2);
-  tft.drawString("Vodafone: *9*7*" + num + "*" + String(amount) + "#", 8, 142, 2);
-  tft.drawString("e&: *777*1# > number > amount", 8, 164, 2);
+  tft.drawString("Vodafone *9*7*" + num + "*" + String(amount) + "#", 8, 178, 2);
+  tft.drawString("Orange #115# > Transfer", 8, 196, 2);
+  tft.drawString("e& *777*1# > number > amount", 8, 214, 2);
+}
+
+void drawTabs() {
+  bool w = !showCard && !showTransfer;
+  button(TAB_W, "Wallet", w ? C_ORANGE : C_KEY, w ? TFT_WHITE : C_INK, 2);
+  button(TAB_C, "Card", showCard ? C_ORANGE : C_KEY, showCard ? TFT_WHITE : C_INK, 2);
+  button(TAB_I, "InstaPay", showTransfer ? C_ORANGE : C_KEY, showTransfer ? TFT_WHITE : C_INK, 2);
 }
 
 void drawQr() {
   static uint8_t q[hpqr_BUFFER_LEN_FOR_VERSION(14)], tmp[hpqr_BUFFER_LEN_FOR_VERSION(14)];
   tft.fillScreen(C_BG);
-  tft.fillRect(0, 0, 234, 240, TFT_WHITE);
+  tft.fillRect(0, 32, 234, 208, TFT_WHITE);
   long amount0;
   { Lock l; amount0 = S.sale.amount; }
   if (showTransfer) { drawTransfer(amount0); }
@@ -844,35 +856,39 @@ void drawQr() {
   if (showTransfer) {
   } else if (ok) {
     int n = hpqr_getSize(q);
-    int scale = 226 / (n + 4);
+    int scale = 200 / (n + 4);
     if (scale < 1) scale = 1;
-    int size = n * scale, ox = (234 - size) / 2, oy = (240 - size) / 2;
+    int size = n * scale, ox = (234 - size) / 2, oy = 32 + (208 - size) / 2;
     for (int y = 0; y < n; y++)
       for (int x = 0; x < n; x++)
         if (hpqr_getModule(q, x, y)) tft.fillRect(ox + x * scale, oy + y * scale, scale, scale, TFT_BLACK);
   } else {
     tft.setTextColor(C_RED, TFT_WHITE);
     tft.setTextDatum(MC_DATUM);
-    tft.drawString("QR too long", 117, 120, 2);
+    tft.drawString("QR too long", 117, 136, 2);
   }
+  drawTabs();
   long amount, number, tip;
   { Lock l; amount = S.sale.amount; number = S.sale.number; tip = S.sale.tip; }
   tft.setTextColor(C_MUTED, C_BG);
   tft.setTextDatum(TL_DATUM);
-  tft.drawString("Pay", 240, 6, 2);
+  tft.drawString("Total", 240, 36, 2);
   tft.setTextColor(C_INK, C_BG);
-  tft.drawString(money(amount), 240, 24, 4);
+  tft.drawString(money(amount), 240, 52, 4);
   tft.setTextColor(C_MUTED, C_BG);
-  tft.drawString("EGP", 240, 52, 2);
-  tft.drawString("Bill " + String(number), 240, 70, 2);
-  if (tip > 0) { tft.setTextColor(C_GREEN_DARK, C_BG); tft.drawString("Tip " + money(tip), 240, 86, 2); tft.setTextColor(C_MUTED, C_BG); }
-  // Above the code: what to scan it with, or a cashier message.
-  tft.setTextDatum(MC_DATUM);
-  if (noteOn()) { tft.setTextColor(C_RED, TFT_WHITE); tft.drawString(note.substring(0, 34), 117, showTransfer ? 220 : 10, 2); }
-  else if (!showTransfer) { tft.setTextColor(C_MUTED, TFT_WHITE); tft.drawString(showCard ? "Card: scan with the phone camera" : "Scan with any wallet app", 117, 10, 2); }
-  // Wallet -> Card -> Transfer -> Wallet
-  button(BTN_TOGGLE, showTransfer ? "Wallet" : showCard ? "Transfer" : "Card", C_KEY, C_INK, 2);
+  tft.drawString("EGP", 240, 78, 2);
+  tft.drawString("Bill " + String(number), 240, 94, 2);
+  if (tip > 0) { tft.setTextColor(C_GREEN_DARK, C_BG); tft.drawString("Tip " + money(tip), 240, 108, 1); tft.setTextColor(C_MUTED, C_BG); }
   button(BTN_MORE, "More", C_KEY, C_INK, 2);
+  // A cashier message, in three short lines under More.
+  if (noteOn()) {
+    tft.setTextColor(C_RED, C_BG);
+    tft.setTextDatum(TL_DATUM);
+    for (int i = 0; i < 3; i++) {
+      String part = note.substring(i * 13, i * 13 + 13);
+      if (part.length()) tft.drawString(part, 238, 158 + i * 9, 1);
+    }
+  }
   button(BTN_CANCEL, "Cancel", C_KEY, C_INK, 2);
 }
 
@@ -880,12 +896,12 @@ void drawQrStatus() {
   bool reg, online;
   String status;
   { Lock l; reg = S.sale.registered; online = S.online; status = S.sale.status; }
-  tft.fillRect(236, 174, 84, 24, C_BG);
+  tft.fillRect(236, 184, 84, 16, C_BG);
   tft.setTextDatum(TL_DATUM);
   uint16_t c = reg ? C_GREEN_DARK : online ? C_MUTED : C_RED;
   tft.setTextColor(c, C_BG);
   String line = status == "refused" ? "Refused" : (status == "screenshot" || status == "approval") ? "Check" : reg ? "Waiting" : online ? "Saving..." : "Offline";
-  tft.drawString(line, 240, 178, 2);
+  tft.drawString(line, 240, 185, 2);
 }
 
 const Btn RB_EXTRA{4, 196, 152, 40}, RB_CASH{164, 196, 152, 40};
@@ -1028,10 +1044,9 @@ void drawMore() {
   size_t inc;
   { Lock l; number = S.sale.number; amount = S.sale.amount; inc = S.incoming.size(); }
   titleBar("Bill " + String(number) + "  " + money(amount) + " EGP");
-  button(rowBtn(0), "InstaPay: buyer's last 3 digits", C_KEY, C_INK, 2);
+  button(rowBtn(0), "InstaPay: his last 3 digits", C_KEY, C_INK, 2);
   button(rowBtn(1), ("Incoming payments (" + String(inc) + ")").c_str(), C_KEY, C_INK, 2);
-  button(rowBtn(2), "Buyer's mobile number", C_KEY, C_INK, 2);
-  button(rowBtn(3), "Back to the QR", C_ORANGE, TFT_WHITE, 2);
+  button(rowBtn(2), "Back to payment", C_ORANGE, TFT_WHITE, 2);
 }
 
 String entryTitle() {
@@ -1407,7 +1422,7 @@ void loop() {
       if (rres == "paid") { setNote("Found. Confirming...", 3000); screen = SCR_QR; }
       else if (rres == "need_full") { entryMax = 11; entry = ""; setNote("Two numbers end the same: enter his full number"); }
       else if (rres == "locked") { entryMax = 11; entry = ""; setNote("3 tries: owner alerted. Full number needed"); }
-      else { setNote("No payment from ..." + entry.substring(entry.length() > 3 ? entry.length() - 3 : 0) + " yet. It turns Paid when it arrives", 8000); screen = SCR_QR; }
+      else { setNote("Linked ..." + entry.substring(entry.length() > 3 ? entry.length() - 3 : 0) + ". Paid when it arrives", 8000); screen = SCR_QR; }
     } else if (rq.startsWith("action=attach")) {
       setNote("Attached. Confirming...", 3000);
       screen = SCR_QR;
@@ -1532,24 +1547,27 @@ void loop() {
       cancelSale();
       screen = SCR_HOME;
       dirty = true;
-    } else if (BTN_TOGGLE.hit(x, y)) {
-      if (showTransfer) { showTransfer = false; showCard = false; }
-      else if (showCard) { showCard = false; showTransfer = true; }
-      else if (known) showCard = true;
-      else showTransfer = true;  // the card page needs the sale on the server first
-      dirty = true;
+    } else if (TAB_W.hit(x, y)) {
+      showCard = false; showTransfer = false; dirty = true;
+    } else if (TAB_C.hit(x, y)) {
+      if (!known) { setNote("Saving the sale... try again in a moment", 3000); dirty = true; return; }
+      showCard = true; showTransfer = false; dirty = true;
+    } else if (TAB_I.hit(x, y)) {
+      showCard = false; showTransfer = true; dirty = true;
+    } else if (showTransfer && BTN_DIGITS.hit(x, y)) {
+      if (!known) { setNote("Saving the sale... try again in a moment", 3000); dirty = true; return; }
+      openEntry(EN_CLAIM);
     } else if (BTN_MORE.hit(x, y)) {
       if (!known) { setNote("Saving the sale... try again in a moment", 3000); dirty = true; return; }
       screen = SCR_MORE;
       dirty = true;
     }
   } else if (screen == SCR_MORE) {
-    if (BTN_BACKBAR.hit(x, y) || rowBtn(3).hit(x, y)) { screen = SCR_QR; dirty = true; }
+    if (BTN_BACKBAR.hit(x, y) || rowBtn(2).hit(x, y)) { screen = SCR_QR; dirty = true; }
     else if (rowBtn(0).hit(x, y)) openEntry(EN_CLAIM);
     else if (rowBtn(1).hit(x, y)) { screen = SCR_INCOMING; dirty = true; }
-    else if (rowBtn(2).hit(x, y)) openEntry(EN_BUYER);
   } else if (screen == SCR_DIGITS) {
-    if (BTN_BACKBAR.hit(x, y)) { screen = entryKind == EN_CASHTIP ? SCR_RESULT : SCR_MORE; resultSince = millis(); dirty = true; return; }
+    if (BTN_BACKBAR.hit(x, y)) { screen = entryKind == EN_CASHTIP ? SCR_RESULT : SCR_QR; resultSince = millis(); dirty = true; return; }
     if (BTN_QR.hit(x, y)) {
       bool ok = entryKind == EN_CASHTIP ? entry.toInt() > 0 : entry.length() == entryMax;
       if (!ok || reqBusy()) return;
