@@ -842,6 +842,7 @@ void drawTabs() {
   button(TAB_I, "InstaPay", showTransfer ? C_ORANGE : C_KEY, showTransfer ? TFT_WHITE : C_INK, 2);
 }
 
+void drawIncomingBtn();
 void drawQr() {
   static uint8_t q[hpqr_BUFFER_LEN_FOR_VERSION(14)], tmp[hpqr_BUFFER_LEN_FOR_VERSION(14)];
   tft.fillScreen(C_BG);
