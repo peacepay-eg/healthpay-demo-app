@@ -10,10 +10,9 @@
 //   cyd_st7789 the same board with an ST7789 screen (some USB-C versions)
 //   e32        2.8" ESP32-32E (E32R28T), ILI9341, touch shares the screen's bus
 //   e32_st7789 the same with an ST7789 screen
-// Each also comes as a restaurant version (*_rest, BOX_RESTAURANT): before the
-// QR the cashier picks who served the table and the buyer picks a tip; the QR
-// is for the bill plus the tip. It acts like the shop version when the
-// server's business type for the shop is not a restaurant.
+// One file for every merchant (v0.8.1): when the logged-in person's shop is a
+// restaurant or cafe, the box asks who served the table and offers a tip before
+// the QR; for a shop it goes straight from the amount to the QR.
 //
 // Demo only: the server's TLS certificate is not checked (setInsecure).
 
@@ -38,14 +37,9 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.8.0"
-#ifdef BOX_RESTAURANT
-static const bool RESTAURANT = true;
-#define BOX_KIND "Restaurant"
-#else
-static const bool RESTAURANT = false;
-#define BOX_KIND "Shop"
-#endif
+#define BOX_VERSION "0.8.1"
+static const bool RESTAURANT = true;  // restaurant features follow the server's business type
+#define BOX_KIND "Shop+Cafe"
 #ifndef BOX_BOARD
 #define BOX_BOARD "unknown"
 #endif

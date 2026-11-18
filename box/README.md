@@ -7,17 +7,17 @@ demo server, and says "received ... pounds" in Arabic when it is paid.
 GitHub builds one file per board on every change under `box/` and puts them on
 the `firmware` branch:
 
-Each board comes in two versions: **Shop** (amount, then QR) and **Restaurant**
-(amount, then "Served by", then the buyer's tip, then a QR for the bill plus
-the tip). The restaurant version needs the shop's business type set to
-"Restaurant or cafe" (server v0.5.9+); otherwise it acts like the shop version.
+One file per board serves every merchant (v0.8.1). When the logged-in person's
+shop is a restaurant or cafe (business type "Restaurant or cafe" on the server),
+the box asks who served the table and offers a tip before the QR; for a shop it
+goes straight from the amount to the QR.
 
-| File (Shop_ or Restaurant_) | Board |
+| File | Board |
 |---|---|
-| HealthPayBox_*_2432S028R.bin | ESP32-2432S028R (ILI9341 screen) - try this first |
-| HealthPayBox_*_2432S028_ST7789.bin | the same board with an ST7789 screen (screen stays white or black with the first file) |
-| HealthPayBox_*_E32R28T.bin | 2.8" ESP32-32E (E32R28T) |
-| HealthPayBox_*_E32R28T_ST7789.bin | E32R28T with an ST7789 screen |
+| HealthPayBox_2432S028R.bin | ESP32-2432S028R (ILI9341 screen) - try this first |
+| HealthPayBox_2432S028_ST7789.bin | the same board with an ST7789 screen (screen stays white or black with the first file) |
+| HealthPayBox_E32R28T.bin | 2.8" ESP32-32E (E32R28T) |
+| HealthPayBox_E32R28T_ST7789.bin | E32R28T with an ST7789 screen |
 
 Flash the file from address 0x0 (one step) with Espressif's web flasher.
 The server side is the `type=box` API of the demo Google Apps Script (v0.4.1+).

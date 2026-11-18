@@ -34,9 +34,9 @@ jobs:
         with:
           path: ~/.platformio
           key: pio-${{ hashFiles('box/platformio.ini') }}
-      - name: Build the four boards, shop and restaurant
+      - name: Build the four boards (one file each, shops and restaurants)
         run: |
-          for e in cyd cyd_st7789 e32 e32_st7789 cyd_rest cyd_st7789_rest e32_rest e32_st7789_rest; do
+          for e in cyd cyd_st7789 e32 e32_st7789; do
             pio run -e $e
             pio run -e $e -t buildfs
           done
