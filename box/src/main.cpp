@@ -37,7 +37,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.8.1"
+#define BOX_VERSION "0.8.2"
 static const bool RESTAURANT = true;  // restaurant features follow the server's business type
 #define BOX_KIND "Shop+Cafe"
 #ifndef BOX_BOARD
@@ -349,7 +349,12 @@ void netOps() {
   }
   if (ok || S.online) {
     if (!S.ops.empty() && S.ops.front().number == op.number && S.ops.front().kind == op.kind) S.ops.erase(S.ops.begin());
-    if (ok && op.kind == OP_SALE && S.sale.number == op.number) S.sale.registered = true;
+    if (ok && op.kind == OP_SALE && S.sale.number == op.number) {
+      S.sale.registered = true;
+      // The server answers with the sale's id: the Card tab can open at once.
+      const char *sid = doc["id"] | "";
+      if (sid[0]) S.sale.id = sid;
+    }
   }
 }
 
@@ -705,6 +710,7 @@ String waiterId = "", waiterLabel = "";
 long tipChoice[3] = {1, 2, 5};
 // Cashier tools for the sale on screen.
 bool showCard = false;          // the QR shows the card page instead of the wallet code
+bool wantCard = false;          // Card was tapped before the server knew the sale: open it when it does
 bool showTransfer = false;      // the number to transfer to, InstaPay and USSD codes
 std::string walletQr;           // the sale's wallet (Meeza) code
 enum Entry { EN_CLAIM, EN_BUYER, EN_CASHTIP };
@@ -1278,6 +1284,7 @@ void startSale(long amount, long tip = -1, const String &waiter = "") {
                            cache.termQr.length() ? cache.termQr.c_str() : cache.termId.length() ? cache.termId.c_str() : "main");
   qrText = walletQr;
   showCard = false;
+  wantCard = false;
   showTransfer = false;
   note = "";
   screen = SCR_QR;
@@ -1373,6 +1380,14 @@ void loop() {
       }
     }
   }
+
+  // Card tapped while the sale was still being saved: switch to it as soon as the server knows the sale.
+  if (wantCard && screen == SCR_QR) {
+    bool known;
+    { Lock l; known = S.sale.id.length() > 0; }
+    if (known) { wantCard = false; showCard = true; showTransfer = false; setNote("", 0); dirty = true; }
+  }
+  if (wantCard && screen != SCR_QR) wantCard = false;
 
   // Online dot / toast expiry on the home screen.
   bool online;
@@ -1542,12 +1557,12 @@ void loop() {
       screen = SCR_HOME;
       dirty = true;
     } else if (TAB_W.hit(x, y)) {
-      showCard = false; showTransfer = false; dirty = true;
+      wantCard = false; showCard = false; showTransfer = false; dirty = true;
     } else if (TAB_C.hit(x, y)) {
-      if (!known) { setNote("Saving the sale... try again in a moment", 3000); dirty = true; return; }
-      showCard = true; showTransfer = false; dirty = true;
+      if (!known) { wantCard = true; showTransfer = false; setNote("Preparing the card page...", 8000); dirty = true; return; }
+      wantCard = false; showCard = true; showTransfer = false; dirty = true;
     } else if (TAB_I.hit(x, y)) {
-      showCard = false; showTransfer = true; dirty = true;
+      wantCard = false; showCard = false; showTransfer = true; dirty = true;
     } else if (showTransfer && BTN_DIGITS.hit(x, y)) {
       if (!known) { setNote("Saving the sale... try again in a moment", 3000); dirty = true; return; }
       openEntry(EN_CLAIM);
