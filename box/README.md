@@ -12,6 +12,13 @@ shop is a restaurant or cafe (business type "Restaurant or cafe" on the server),
 the box asks who served the table and offers a tip before the QR; for a shop it
 goes straight from the amount to the QR.
 
+Bills and recharges (v0.9.0, needs server v0.10.0): the **Menu** key (where
+Today used to be) opens Bills and recharges, and Today's sales. The cashier
+picks a service, types the account or mobile number on the keypad, sees the
+amount due, and takes **Cash** (the bill is paid at once from the shop's wallet)
+or **QR / card** (the usual payment screen; the bill is paid when the customer
+pays). Demo services only: no real bill is paid.
+
 | File | Board |
 |---|---|
 | HealthPayBox_2432S028R.bin | ESP32-2432S028R (ILI9341 screen) - try this first |

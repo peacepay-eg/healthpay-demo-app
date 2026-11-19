@@ -37,7 +37,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.8.3"
+#define BOX_VERSION "0.9.0"
 static const bool RESTAURANT = true;  // restaurant features follow the server's business type
 #define BOX_KIND "Shop+Cafe"
 #ifndef BOX_BOARD
@@ -154,6 +154,7 @@ struct Op {
   long number, amount;
   long tip;
   String waiter;
+  String biller, account;  // a bill the customer pays by QR, card or InstaPay (set after the braces)
 };
 
 struct SaleView {
@@ -163,6 +164,19 @@ struct SaleView {
   String status = "";  // from the server: waiting, paid, screenshot, approval, expired, cancelled
   long paid = 0, diff = 0;
   String from3, method;
+  String billStatus, billRef, billName;  // a bill sale: the bill's own status once paid
+};
+
+// Bills and recharges the box can sell (from the server's hello).
+struct BillerItem {
+  String id, name, kind, field;
+  int min = 8, max = 12;
+};
+// The bill being sold: the amount due (looked up) and, once paid in cash, its reference.
+struct BillView {
+  String biller, name, account, customer, ref, result;
+  long amount = 0;
+  double commission = 0;
 };
 
 struct Event {
@@ -210,6 +224,8 @@ struct Shared {
   String ticket, sentTo;         // login in progress
   String wallet;                 // the shop's wallet number (transfers and USSD)
   String user;                   // who is signed in on this counter
+  std::vector<BillerItem> billers;
+  BillView bill;
   Req req;
   uint32_t lastPollMs = 0;
 } S;
@@ -311,6 +327,17 @@ void netHello() {
   S.serverNow = doc["now"] | 0LL;
   readStaff(doc);
   readUser(doc);
+  S.billers.clear();
+  for (JsonObject b : doc["billers"].as<JsonArray>()) {
+    BillerItem it;
+    it.id = (const char *)(b["id"] | "");
+    it.name = (const char *)(b["name"] | "");
+    it.kind = (const char *)(b["kind"] | "bill");
+    it.field = (const char *)(b["field"] | "Account number");
+    it.min = b["min"] | 8;
+    it.max = b["max"] | 12;
+    if (it.id.length() && S.billers.size() < 6) S.billers.push_back(it);
+  }
   if (!S.since) S.since = S.serverNow;
   S.helloDone = true;
   S.needHello = false;
@@ -341,6 +368,7 @@ void netOps() {
                                 : "action=cancel&number=" + String(op.number);
   if (op.kind == OP_SALE && op.tip >= 0) q += "&tip=" + String(op.tip);  // -1: no tip asked (shop)
   if (op.kind == OP_SALE && op.waiter.length()) q += "&waiter=" + urlEncode(op.waiter);
+  if (op.kind == OP_SALE && op.biller.length()) q += "&biller=" + urlEncode(op.biller) + "&account=" + urlEncode(op.account);
   bool ok = callServer(q, doc);
   Lock l;
   if (!ok && S.online && op.kind == OP_SALE) {
@@ -386,6 +414,11 @@ void netPoll() {
     S.sale.from3 = (const char *)(s["from3"] | "");
     S.sale.method = (const char *)(s["method"] | "");
     S.sale.id = (const char *)(s["id"] | "");
+    if (s["bill"].is<JsonObject>()) {
+      S.sale.billStatus = (const char *)(s["bill"]["status"] | "");
+      S.sale.billRef = (const char *)(s["bill"]["ref"] | "");
+      S.sale.billName = (const char *)(s["bill"]["name"] | "");
+    }
   }
   S.mode = (const char *)(doc["mode"] | "standard");
   S.incoming.clear();
@@ -440,6 +473,19 @@ void netReq() {
     saveSettings();
     saveCache();
     S.needHello = true;  // this person's shop, QR and payment point
+  }
+  if (ok && q.startsWith("action=billquote")) {
+    S.bill.name = (const char *)(doc["name"] | "");
+    S.bill.account = (const char *)(doc["account"] | "");
+    S.bill.customer = (const char *)(doc["customer"] | "");
+    S.bill.amount = lround((double)(doc["amount"] | 0.0));
+    S.bill.commission = doc["commission"] | 0.0;
+    S.bill.ref = ""; S.bill.result = "";
+  }
+  if (ok && q.startsWith("action=billpay")) {
+    S.bill.ref = (const char *)(doc["ref"] | "");
+    S.bill.result = (const char *)(doc["result"] | "");
+    S.bill.commission = doc["commission"] | S.bill.commission;
   }
   if (ok && q.startsWith("action=today")) {
     S.today.clear();
@@ -697,7 +743,8 @@ void drawTick(int cx, int cy, int r, uint16_t c) {
 
 // ---------------------------------------------------------------- screens
 enum Screen { SCR_HOME, SCR_QR, SCR_RESULT, SCR_SETTINGS, SCR_WAITER, SCR_TIP,
-              SCR_MORE, SCR_DIGITS, SCR_INCOMING, SCR_CONFIRM, SCR_TODAY, SCR_SIGNIN };
+              SCR_MORE, SCR_DIGITS, SCR_INCOMING, SCR_CONFIRM, SCR_TODAY, SCR_SIGNIN,
+              SCR_MENU, SCR_BILLERS, SCR_BILLACCT, SCR_BILLQUOTE, SCR_BILLDONE };
 Screen screen = SCR_HOME;
 bool dirty = true;
 String typed = "";
@@ -742,7 +789,7 @@ bool tipsOn() {
   return S.tips;
 }
 
-const char *KEYS[4][4] = {{"1", "2", "3", "Del"}, {"4", "5", "6", "Clear"}, {"7", "8", "9", ""}, {"00", "0", "Today", ""}};
+const char *KEYS[4][4] = {{"1", "2", "3", "Del"}, {"4", "5", "6", "Clear"}, {"7", "8", "9", ""}, {"00", "0", "Menu", ""}};
 const char *DKEYS[4][4] = {{"1", "2", "3", "Del"}, {"4", "5", "6", "Clear"}, {"7", "8", "9", ""}, {"", "0", "", ""}};
 Btn keyBtn(int r, int c) { return Btn{4 + c * 79, 84 + r * 39, 75, 35}; }
 const Btn BTN_QR{4 + 3 * 79, 84 + 2 * 39, 75, 74};
@@ -940,6 +987,13 @@ void drawResult() {
   if (from3.length()) d += "  from ..." + from3;
   tft.setTextDatum(MC_DATUM);
   tft.drawString(d, 160, 150, 2);
+  String bst, bref, bname;
+  { Lock l; bst = S.sale.billStatus; bref = S.sale.billRef; bname = S.sale.billName; }
+  if (bst.length()) {
+    tft.drawString(bst == "paid" ? bname + " bill paid  ref " + bref : bst == "waiting" ? String("Paying the bill...") : bname + ": not paid, see the owner", 160, 185, 2);
+    tft.drawString("Tap for a new sale", 160, 222, 2);
+    return;
+  }
   if (tipsOn()) {
     // Restaurant: the extra can be his tip, and a cash tip can be recorded.
     if (diff < 0) tft.drawString("Still owed " + money(-diff) + " EGP", 160, 174, 2);
@@ -1200,6 +1254,115 @@ void drawSignIn() {
   drawPinOnly();
 }
 
+// ---------------------------------------------------------------- bills and recharges (v0.9.0)
+// The customer pays the shop; the bill is paid from the shop's wallet and the
+// shop earns a commission. Demo billers only: nothing real is paid.
+int billerPick = -1;
+int billStep = 0;            // 0: account number, 1: recharge amount
+String billAcct = "", billAmt = "";
+const Btn QB_CASH{8, 150, 148, 50}, QB_QR{164, 150, 148, 50};
+Btn billerBtn(int i) { return Btn{4 + (i % 2) * 158, 36 + (i / 2) * 50, 154, 44}; }
+
+void drawMenu() {
+  titleBar("Menu");
+  button(rowBtn(0), "Bills and recharges", C_ORANGE, TFT_WHITE, 4);
+  button(rowBtn(1), "Today's sales on this counter", C_KEY, C_INK, 2);
+  button(rowBtn(2), "Back", C_KEY, C_INK, 2);
+}
+void drawBillers() {
+  std::vector<BillerItem> list;
+  { Lock l; list = S.billers; }
+  titleBar("Bills and recharges");
+  if (list.empty()) {
+    tft.setTextColor(C_MUTED, C_BG);
+    tft.setTextDatum(ML_DATUM);
+    tft.drawString("Loading the services... tap Back", 8, 60, 2);
+    return;
+  }
+  for (size_t i = 0; i < list.size() && i < 6; i++) button(billerBtn(i), list[i].name.c_str(), C_KEY, C_INK, 2);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString("Demo: simulated services. No real bill is paid.", 8, 196, 1);
+}
+BillerItem billerNow() {
+  Lock l;
+  if (billerPick < 0 || billerPick >= (int)S.billers.size()) return BillerItem();
+  return S.billers[billerPick];
+}
+String billEntry() { return billStep == 0 ? billAcct : billAmt; }
+bool billEntryOk() {
+  BillerItem b = billerNow();
+  if (billStep == 1) { long a = billAmt.toInt(); return a >= 5 && a <= 1000; }
+  return (int)billAcct.length() >= b.min && (int)billAcct.length() <= b.max;
+}
+void drawBillEntryOnly() {
+  tft.fillRect(0, 31, 320, 52, C_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(C_INK, C_BG);
+  String e = billEntry();
+  tft.drawString(e.length() ? e : String("-"), 8, 50, 4);
+  if (noteOn()) { tft.setTextColor(C_RED, C_BG); tft.drawString(note.substring(0, 44), 8, 74, 2); }
+  else if (reqBusy()) { tft.setTextColor(C_MUTED, C_BG); tft.drawString("Checking the bill...", 8, 74, 2); }
+  else {
+    BillerItem b = billerNow();
+    tft.setTextColor(C_MUTED, C_BG);
+    tft.drawString(billStep == 1 ? String("5 to 1,000 EGP") : b.min == b.max ? String(b.min) + " digits" : String(b.min) + " to " + String(b.max) + " digits", 8, 74, 2);
+  }
+  button(BTN_QR, "OK", billEntryOk() ? C_ORANGE : C_LINE, TFT_WHITE, 4);
+}
+void drawBillAcct() {
+  BillerItem b = billerNow();
+  titleBar(b.name + ": " + (billStep == 1 ? String("amount (EGP)") : b.field));
+  for (int r = 0; r < 4; r++)
+    for (int c = 0; c < 4; c++) {
+      if (!DKEYS[r][c][0]) continue;
+      button(keyBtn(r, c), DKEYS[r][c], C_KEY, C_INK, strlen(DKEYS[r][c]) > 2 ? 2 : 4);
+    }
+  drawBillEntryOnly();
+}
+void drawBillQuote() {
+  BillView v;
+  { Lock l; v = S.bill; }
+  titleBar(v.name);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.drawString(v.account + "  " + v.customer, 8, 46, 2);
+  tft.setTextColor(C_INK, C_BG);
+  tft.drawString(money(v.amount), 8, 86, 6);
+  tft.drawString("EGP", 16 + tft.textWidth(money(v.amount), 6), 98, 4);
+  tft.setTextColor(C_GREEN_DARK, C_BG);
+  tft.drawString("The shop earns " + String(v.commission, v.commission == (long)v.commission ? 0 : 2) + " EGP", 8, 124, 2);
+  if (noteOn()) { tft.setTextColor(C_RED, C_BG); tft.drawString(note.substring(0, 44), 8, 140, 2); }
+  button(QB_CASH, reqBusy() ? "Paying..." : "Cash", C_ORANGE, TFT_WHITE, 4);
+  button(QB_QR, "QR / card", C_KEY, C_INK, 4);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString("Cash: paid now from the shop's wallet.", 8, 212, 1);
+  tft.drawString("QR / card: paid as soon as the customer pays.", 8, 226, 1);
+}
+void drawBillDone() {
+  BillView v;
+  { Lock l; v = S.bill; }
+  bool ok = v.result == "paid";
+  uint16_t bg = ok ? C_GREEN : C_AMBER;
+  tft.fillScreen(bg);
+  tft.setTextColor(TFT_WHITE, bg);
+  if (ok) drawTick(56, 70, 70, TFT_WHITE);
+  tft.setTextDatum(ML_DATUM);
+  tft.drawString(ok ? "Bill paid" : "Not paid", 110, 40, 4);
+  tft.drawString(money(v.amount), 110, 90, 6);
+  tft.drawString("EGP", 110 + tft.textWidth(money(v.amount), 6) + 8, 102, 4);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString(v.name + "  " + v.account, 160, 140, 2);
+  if (ok) {
+    tft.drawString("Ref " + v.ref, 160, 162, 4);
+    tft.drawString("The shop earned " + String(v.commission, v.commission == (long)v.commission ? 0 : 2) + " EGP", 160, 190, 2);
+  } else {
+    tft.drawString("The shop's wallet is too low", 160, 170, 2);
+  }
+  tft.drawString("Tap to continue", 160, 222, 2);
+}
+
 void openEntry(Entry k) {
   entryKind = k;
   entry = "";
@@ -1271,7 +1434,7 @@ void runPortal() {
 }
 
 // ---------------------------------------------------------------- sale flow
-void startSale(long amount, long tip = -1, const String &waiter = "") {
+void startSale(long amount, long tip = -1, const String &waiter = "", const String &biller = "", const String &account = "") {
   long number;
   {
     Lock l;
@@ -1288,7 +1451,10 @@ void startSale(long amount, long tip = -1, const String &waiter = "") {
     S.sale.amount = amount;
     S.sale.tip = tip > 0 ? tip : 0;
     S.sale.status = "waiting";
-    S.ops.push_back(Op{OP_SALE, number, amount, tip, waiter});
+    Op op{OP_SALE, number, amount, tip, waiter};
+    op.biller = biller;
+    op.account = account;
+    S.ops.push_back(op);
     S.lastPollMs = millis();
   }
   walletQr = meeza::saleQr(cache.qrBase.c_str(), amount, number,
@@ -1423,6 +1589,11 @@ void loop() {
     else if (screen == SCR_CONFIRM) drawConfirm();
     else if (screen == SCR_TODAY) drawToday();
     else if (screen == SCR_SIGNIN) drawSignIn();
+    else if (screen == SCR_MENU) drawMenu();
+    else if (screen == SCR_BILLERS) drawBillers();
+    else if (screen == SCR_BILLACCT) drawBillAcct();
+    else if (screen == SCR_BILLQUOTE) drawBillQuote();
+    else if (screen == SCR_BILLDONE) drawBillDone();
   }
 
   // A cashier request was answered.
@@ -1436,6 +1607,7 @@ void loop() {
   if (rdone) {
     if (!rok) {
       setNote(rmsg.length() ? rmsg : String("Not sent: check the connection"));
+      if (rq.startsWith("action=billpay") && rmsg.indexOf("Not enough") >= 0) setNote("Wallet too low: use QR / card, or the owner", 10000);
       if (rq.startsWith("action=login")) pinTyped = "";
       if (rq.startsWith("action=login2") && rmsg.indexOf("start again") >= 0) loginStep = LS_MOBILE;
     } else if (rq.startsWith("action=claim")) {
@@ -1461,6 +1633,12 @@ void loop() {
     } else if (rq.startsWith("action=logout")) {
       pinTyped = ""; loginStep = LS_MOBILE;
       screen = SCR_SIGNIN;
+    } else if (rq.startsWith("action=billquote")) {
+      note = "";
+      screen = SCR_BILLQUOTE;
+    } else if (rq.startsWith("action=billpay")) {
+      screen = SCR_BILLDONE;
+      resultSince = millis();
     } else if (rq.startsWith("action=tip")) {
       Lock l;
       if (rq.indexOf("kind=extra") > 0) { S.sale.tip += S.sale.diff; S.sale.diff = 0; }
@@ -1511,6 +1689,13 @@ void loop() {
       dirty = true;
     }
   }
+  if (screen == SCR_RESULT) {
+    static String lastBill;
+    String b;
+    { Lock l; b = S.sale.billStatus + S.sale.billRef; }
+    if (b != lastBill) { lastBill = b; dirty = true; }
+  }
+  if (screen == SCR_BILLDONE && millis() - resultSince > 20000UL) { screen = SCR_HOME; typed = ""; dirty = true; }
   if (screen == SCR_RESULT && millis() - resultSince > (tipsOn() ? 25000UL : 12000UL)) {
     { Lock l; S.sale = SaleView(); }
     typed = "";
@@ -1559,7 +1744,7 @@ void loop() {
       for (int c = 0; c < 4; c++) {
         const char *k = KEYS[r][c];
         if (!k[0] || !keyBtn(r, c).hit(x, y)) continue;
-        if (!strcmp(k, "Today")) { sendReq("action=today"); screen = SCR_TODAY; dirty = true; return; }
+        if (!strcmp(k, "Menu")) { screen = SCR_MENU; dirty = true; return; }
         if (!strcmp(k, "Del")) { if (typed.length()) typed.remove(typed.length() - 1); }
         else if (!strcmp(k, "Clear")) typed = "";
         else if (typed.length() + strlen(k) <= 6 && !(typed.isEmpty() && k[0] == '0')) typed += k;
@@ -1671,7 +1856,9 @@ void loop() {
         return;
       }
   } else if (screen == SCR_RESULT) {
-    if (tipsOn()) {
+    bool billSale;
+    { Lock l; billSale = S.sale.billStatus.length() > 0; }
+    if (tipsOn() && !billSale) {
       long diff, number;
       String st;
       { Lock l; diff = S.sale.diff; number = S.sale.number; st = S.sale.status; }
@@ -1708,6 +1895,65 @@ void loop() {
       if (screen != SCR_QR) { screen = SCR_HOME; dirty = true; }  // no numbers yet: the toast says why
       return;
     }
+  } else if (screen == SCR_MENU) {
+    if (BTN_BACKBAR.hit(x, y) || rowBtn(2).hit(x, y)) { screen = SCR_HOME; dirty = true; }
+    else if (rowBtn(0).hit(x, y)) { billerPick = -1; screen = SCR_BILLERS; dirty = true; }
+    else if (rowBtn(1).hit(x, y)) { sendReq("action=today"); screen = SCR_TODAY; dirty = true; }
+  } else if (screen == SCR_BILLERS) {
+    if (BTN_BACKBAR.hit(x, y)) { screen = SCR_MENU; dirty = true; return; }
+    size_t n;
+    { Lock l; n = S.billers.size(); }
+    for (size_t i = 0; i < n && i < 6; i++)
+      if (billerBtn(i).hit(x, y)) { billerPick = i; billStep = 0; billAcct = ""; billAmt = ""; note = ""; screen = SCR_BILLACCT; dirty = true; return; }
+  } else if (screen == SCR_BILLACCT) {
+    if (reqBusy()) return;
+    if (BTN_BACKBAR.hit(x, y)) {
+      if (billStep == 1) { billStep = 0; billAmt = ""; } else screen = SCR_BILLERS;
+      note = ""; dirty = true; return;
+    }
+    BillerItem b = billerNow();
+    if (BTN_QR.hit(x, y)) {
+      if (!billEntryOk()) return;
+      note = "";
+      if (billStep == 0 && b.kind == "topup") { billStep = 1; dirty = true; return; }
+      sendReq("action=billquote&biller=" + urlEncode(b.id) + "&account=" + billAcct + (b.kind == "topup" ? "&amount=" + billAmt : String("")));
+      drawBillEntryOnly();
+      return;
+    }
+    for (int r = 0; r < 4; r++)
+      for (int c = 0; c < 4; c++) {
+        const char *k = DKEYS[r][c];
+        if (!k[0] || !keyBtn(r, c).hit(x, y)) continue;
+        String &e = billStep == 0 ? billAcct : billAmt;
+        unsigned mx = billStep == 0 ? (unsigned)b.max : 4;
+        if (!strcmp(k, "Del")) { if (e.length()) e.remove(e.length() - 1); }
+        else if (!strcmp(k, "Clear")) e = "";
+        else if (e.length() < mx && !(billStep == 1 && e.isEmpty() && k[0] == '0')) e += k;
+        note = "";
+        drawBillEntryOnly();
+        return;
+      }
+  } else if (screen == SCR_BILLQUOTE) {
+    if (reqBusy()) return;
+    if (BTN_BACKBAR.hit(x, y)) { screen = SCR_BILLACCT; dirty = true; return; }
+    BillerItem b = billerNow();
+    if (QB_CASH.hit(x, y)) {
+      sendReq("action=billpay&biller=" + urlEncode(b.id) + "&account=" + billAcct + (b.kind == "topup" ? "&amount=" + billAmt : String("")));
+      dirty = true;
+      return;
+    }
+    if (QB_QR.hit(x, y)) {
+      long amount;
+      { Lock l; amount = S.bill.amount; }
+      // A normal sale with the bill attached: the same Wallet / Card / InstaPay screen.
+      startSale(amount, -1, "", b.id, billAcct);
+      if (screen != SCR_QR) { screen = SCR_BILLQUOTE; dirty = true; }
+      return;
+    }
+  } else if (screen == SCR_BILLDONE) {
+    screen = SCR_HOME;
+    typed = "";
+    dirty = true;
   } else if (screen == SCR_SETTINGS) {
     if (SB_WIFI.hit(x, y)) runPortal();
     else if (SB_CAL.hit(x, y)) { calibrate(); dirty = true; }
