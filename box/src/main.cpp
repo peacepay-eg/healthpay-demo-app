@@ -37,7 +37,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.9.0"
+#define BOX_VERSION "0.9.1"
 static const bool RESTAURANT = true;  // restaurant features follow the server's business type
 #define BOX_KIND "Shop+Cafe"
 #ifndef BOX_BOARD
@@ -165,6 +165,7 @@ struct SaleView {
   long paid = 0, diff = 0;
   String from3, method;
   String billStatus, billRef, billName;  // a bill sale: the bill's own status once paid
+  long billShort = 0;                     // the customer paid this much less than the bill
 };
 
 // Bills and recharges the box can sell (from the server's hello).
@@ -177,6 +178,7 @@ struct BillView {
   String biller, name, account, customer, ref, result;
   long amount = 0;
   double commission = 0;
+  long cardFee = 0;  // a card payment adds this fee for the customer; QR and InstaPay are free
 };
 
 struct Event {
@@ -418,6 +420,7 @@ void netPoll() {
       S.sale.billStatus = (const char *)(s["bill"]["status"] | "");
       S.sale.billRef = (const char *)(s["bill"]["ref"] | "");
       S.sale.billName = (const char *)(s["bill"]["name"] | "");
+      S.sale.billShort = lround((double)(s["bill"]["shortBy"] | 0.0));
     }
   }
   S.mode = (const char *)(doc["mode"] | "standard");
@@ -480,12 +483,18 @@ void netReq() {
     S.bill.customer = (const char *)(doc["customer"] | "");
     S.bill.amount = lround((double)(doc["amount"] | 0.0));
     S.bill.commission = doc["commission"] | 0.0;
+    S.bill.cardFee = lround((double)(doc["cardFee"] | 0.0));
     S.bill.ref = ""; S.bill.result = "";
   }
   if (ok && q.startsWith("action=billpay")) {
     S.bill.ref = (const char *)(doc["ref"] | "");
     S.bill.result = (const char *)(doc["result"] | "");
     S.bill.commission = doc["commission"] | S.bill.commission;
+  }
+  if (ok && q.startsWith("action=billrest")) {
+    S.sale.billStatus = (const char *)(doc["result"] | "");
+    S.sale.billRef = (const char *)(doc["ref"] | "");
+    S.sale.billShort = 0;
   }
   if (ok && q.startsWith("action=today")) {
     S.today.clear();
@@ -963,6 +972,7 @@ void drawQrStatus() {
 }
 
 const Btn RB_EXTRA{4, 196, 152, 40}, RB_CASH{164, 196, 152, 40};
+const Btn RB_BILLREST{30, 188, 260, 40};  // a short bill: the rest was collected in cash
 
 void drawResult() {
   long amount, paid, diff, tip;
@@ -989,6 +999,14 @@ void drawResult() {
   tft.drawString(d, 160, 150, 2);
   String bst, bref, bname;
   { Lock l; bst = S.sale.billStatus; bref = S.sale.billRef; bname = S.sale.billName; }
+  if (bst == "short") {
+    long sh;
+    { Lock l; sh = S.sale.billShort; }
+    tft.drawString(bname + " bill not paid: " + money(sh) + " EGP short", 160, 172, 2);
+    button(RB_BILLREST, reqBusy() ? "Paying..." : ("Collected " + money(sh) + " cash: pay bill").c_str(), TFT_WHITE, C_INK, 2);
+    if (noteOn()) tft.drawString(note.substring(0, 40), 160, 128, 2);
+    return;
+  }
   if (bst.length()) {
     tft.drawString(bst == "paid" ? bname + " bill paid  ref " + bref : bst == "waiting" ? String("Paying the bill...") : bname + ": not paid, see the owner", 160, 185, 2);
     tft.drawString("Tap for a new sale", 160, 222, 2);
@@ -1337,8 +1355,8 @@ void drawBillQuote() {
   button(QB_QR, "QR / card", C_KEY, C_INK, 4);
   tft.setTextColor(C_MUTED, C_BG);
   tft.setTextDatum(ML_DATUM);
-  tft.drawString("Cash: paid now from the shop's wallet.", 8, 212, 1);
-  tft.drawString("QR / card: paid as soon as the customer pays.", 8, 226, 1);
+  tft.drawString("Cash: paid now from the shop's wallet.", 8, 210, 1);
+  tft.drawString("QR / InstaPay: no fee. Card: +" + String(v.cardFee) + " EGP card fee.", 8, 224, 1);
 }
 void drawBillDone() {
   BillView v;
@@ -1633,6 +1651,9 @@ void loop() {
     } else if (rq.startsWith("action=logout")) {
       pinTyped = ""; loginStep = LS_MOBILE;
       screen = SCR_SIGNIN;
+    } else if (rq.startsWith("action=billrest")) {
+      setNote("Bill paid. Thank you!", 4000);
+      resultSince = millis();
     } else if (rq.startsWith("action=billquote")) {
       note = "";
       screen = SCR_BILLQUOTE;
@@ -1696,7 +1717,9 @@ void loop() {
     if (b != lastBill) { lastBill = b; dirty = true; }
   }
   if (screen == SCR_BILLDONE && millis() - resultSince > 20000UL) { screen = SCR_HOME; typed = ""; dirty = true; }
-  if (screen == SCR_RESULT && millis() - resultSince > (tipsOn() ? 25000UL : 12000UL)) {
+  bool billWaits;
+  { Lock l; billWaits = S.sale.billStatus == "short"; }
+  if (screen == SCR_RESULT && !billWaits && millis() - resultSince > (tipsOn() ? 25000UL : 12000UL)) {
     { Lock l; S.sale = SaleView(); }
     typed = "";
     screen = SCR_HOME;
@@ -1857,7 +1880,13 @@ void loop() {
       }
   } else if (screen == SCR_RESULT) {
     bool billSale;
-    { Lock l; billSale = S.sale.billStatus.length() > 0; }
+    String bstat;
+    long bnum;
+    { Lock l; billSale = S.sale.billStatus.length() > 0; bstat = S.sale.billStatus; bnum = S.sale.number; }
+    if (bstat == "short") {
+      if (RB_BILLREST.hit(x, y) && !reqBusy()) { sendReq("action=billrest&number=" + String(bnum)); dirty = true; }
+      return;  // the bill stays on screen until it's paid (the owner or the app can also cancel it)
+    }
     if (tipsOn() && !billSale) {
       long diff, number;
       String st;

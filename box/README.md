@@ -19,6 +19,11 @@ amount due, and takes **Cash** (the bill is paid at once from the shop's wallet)
 or **QR / card** (the usual payment screen; the bill is paid when the customer
 pays). Demo services only: no real bill is paid.
 
+v0.9.1 (server v0.10.1): the amount-due screen says that QR and InstaPay carry
+no fee and that a card adds the card fee (shown to the customer before he pays).
+If the customer pays less than the bill by InstaPay, the bill is not paid: the
+box shows how much is short and a **Collected ... cash: pay bill** button.
+
 | File | Board |
 |---|---|
 | HealthPayBox_2432S028R.bin | ESP32-2432S028R (ILI9341 screen) - try this first |
