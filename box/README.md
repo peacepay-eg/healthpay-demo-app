@@ -31,6 +31,11 @@ paid"). **+1 cash** / **-1** for cash passengers; **Check** says how many have
 not paid; **End** closes the trip and says it again. The owner sees each trip.
 New voice clips: left, notpaid, allpaid (made on the build machine).
 
+v0.10.1 (server v0.11.1): a **Transport** business (owner page → Settings →
+Business type, or a new shop of kind Transport on the admin page) has drivers,
+and the box opens trip mode by itself after it starts. Back leaves trip mode
+for the amount keypad, which a taxi driver uses to type the meter fare.
+
 | File | Board |
 |---|---|
 | HealthPayBox_2432S028R.bin | ESP32-2432S028R (ILI9341 screen) - try this first |
