@@ -39,4 +39,13 @@ std::vector<std::string> received(long n, const std::string &from3) {
   return o;
 }
 
+std::vector<std::string> tripLeft(long left, bool notPaid) {
+  if (left <= 0) return {"allpaid"};
+  std::vector<std::string> o{"left"};
+  auto a = amount(left);
+  o.insert(o.end(), a.begin(), a.end());
+  if (notPaid) o.push_back("notpaid");
+  return o;
+}
+
 }  // namespace words

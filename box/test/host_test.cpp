@@ -23,6 +23,9 @@ int main(int argc, char **argv) {
   check(n >= 3, "QR vectors read");
   check(meeza::saleQr("hello", 5, 1001).empty(), "bad base gives empty");
   check(join(words::amount(5)) == "n5", "5");
+  check(join(words::tripLeft(1, true)) == "left n1 notpaid", "trip 1 not paid");
+  check(join(words::tripLeft(5, false)) == "left n5", "trip 5 left");
+  check(join(words::tripLeft(0, true)) == "allpaid", "trip all paid");
   check(join(words::amount(19)) == "n19", "19");
   check(join(words::amount(20)) == "n20", "20");
   check(join(words::amount(25)) == "n25", "25");

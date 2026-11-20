@@ -24,6 +24,13 @@ no fee and that a card adds the card fee (shown to the customer before he pays).
 If the customer pays less than the bill by InstaPay, the bill is not paid: the
 box shows how much is short and a **Collected ... cash: pay bill** button.
 
+Trip mode (v0.10.0, needs server v0.11.0), for intercity microbuses: Menu →
+**Trip mode** → seats → fare → **Start**. Each passenger pays the fare by
+transfer; the box says "received 85 pounds", then "N left" (or "everyone
+paid"). **+1 cash** / **-1** for cash passengers; **Check** says how many have
+not paid; **End** closes the trip and says it again. The owner sees each trip.
+New voice clips: left, notpaid, allpaid (made on the build machine).
+
 | File | Board |
 |---|---|
 | HealthPayBox_2432S028R.bin | ESP32-2432S028R (ILI9341 screen) - try this first |

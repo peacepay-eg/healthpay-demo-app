@@ -9,4 +9,7 @@ namespace words {
 std::vector<std::string> amount(long n);
 // "Received <amount> pounds", plus "from a number ending in d d d" when given.
 std::vector<std::string> received(long n, const std::string &from3);
+// Trip mode: "<n> left" after a payment; with notPaid, "<n> left, not paid";
+// "everyone paid" when none is left.
+std::vector<std::string> tripLeft(long left, bool notPaid);
 }

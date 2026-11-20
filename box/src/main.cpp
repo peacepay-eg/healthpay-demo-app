@@ -37,7 +37,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.9.1"
+#define BOX_VERSION "0.10.0"
 static const bool RESTAURANT = true;  // restaurant features follow the server's business type
 #define BOX_KIND "Shop+Cafe"
 #ifndef BOX_BOARD
@@ -181,6 +181,12 @@ struct BillView {
   long cardFee = 0;  // a card payment adds this fee for the customer; QR and InstaPay are free
 };
 
+// Trip mode (intercity microbus): seats paid by transfer, cash seats, seats missing.
+struct TripView {
+  bool on = false;
+  long seats = 0, fare = 0, paid = 0, cash = 0, missing = 0, over = 0, partial = 0;
+};
+
 struct Event {
   String id, label, from3;
   long amount, sale;
@@ -228,6 +234,8 @@ struct Shared {
   String user;                   // who is signed in on this counter
   std::vector<BillerItem> billers;
   BillView bill;
+  TripView trip, tripEnd;  // the running trip, and the last one ended
+  bool tripChanged = false;
   Req req;
   uint32_t lastPollMs = 0;
 } S;
@@ -296,6 +304,21 @@ bool callServer(const String &query, JsonDocument &doc) {
 }
 
 // Staff sign-in state (called with the lock held).
+
+// Reads a trip object from the server's answer.
+TripView readTrip(JsonObject t) {
+  TripView v;
+  v.on = String((const char *)(t["status"] | "open")) == "open";
+  v.seats = t["seats"] | 0;
+  v.fare = lround((double)(t["fare"] | 0.0));
+  v.paid = t["paid"] | 0;
+  v.cash = t["cash"] | 0;
+  v.missing = t["missing"] | 0;
+  v.over = t["over"] | 0;
+  v.partial = t["partial"] | 0;
+  return v;
+}
+
 void readUser(JsonDocument &doc) {
   if (doc["signin"].is<bool>()) S.signin = doc["signin"] | false;
   if (doc["user"].is<const char *>()) S.user = (const char *)(doc["user"] | "");
@@ -434,6 +457,12 @@ void netPoll() {
     it.match = x["match"] | false;
     if (it.id.length() && S.incoming.size() < 4) S.incoming.push_back(it);
   }
+  {
+    TripView tv;
+    if (doc["trip"].is<JsonObject>()) tv = readTrip(doc["trip"].as<JsonObject>());
+    if (tv.on != S.trip.on || tv.paid != S.trip.paid || tv.cash != S.trip.cash || tv.missing != S.trip.missing || tv.seats != S.trip.seats) S.tripChanged = true;
+    S.trip = tv;
+  }
   for (JsonObject e : doc["events"].as<JsonArray>()) {
     Event ev;
     ev.id = (const char *)(e["id"] | "");
@@ -476,6 +505,12 @@ void netReq() {
     saveSettings();
     saveCache();
     S.needHello = true;  // this person's shop, QR and payment point
+  }
+  if (ok && q.startsWith("action=trip") && doc["trip"].is<JsonObject>()) {
+    TripView tv = readTrip(doc["trip"].as<JsonObject>());
+    if (tv.on) S.trip = tv;
+    else { S.tripEnd = tv; S.trip = TripView(); }
+    S.tripChanged = true;
   }
   if (ok && q.startsWith("action=billquote")) {
     S.bill.name = (const char *)(doc["name"] | "");
@@ -753,7 +788,8 @@ void drawTick(int cx, int cy, int r, uint16_t c) {
 // ---------------------------------------------------------------- screens
 enum Screen { SCR_HOME, SCR_QR, SCR_RESULT, SCR_SETTINGS, SCR_WAITER, SCR_TIP,
               SCR_MORE, SCR_DIGITS, SCR_INCOMING, SCR_CONFIRM, SCR_TODAY, SCR_SIGNIN,
-              SCR_MENU, SCR_BILLERS, SCR_BILLACCT, SCR_BILLQUOTE, SCR_BILLDONE };
+              SCR_MENU, SCR_BILLERS, SCR_BILLACCT, SCR_BILLQUOTE, SCR_BILLDONE,
+              SCR_TRIPSET, SCR_TRIP, SCR_TRIPEND };
 Screen screen = SCR_HOME;
 bool dirty = true;
 String typed = "";
@@ -1283,9 +1319,12 @@ Btn billerBtn(int i) { return Btn{4 + (i % 2) * 158, 36 + (i / 2) * 50, 154, 44}
 
 void drawMenu() {
   titleBar("Menu");
+  bool tripOn;
+  { Lock l; tripOn = S.trip.on; }
   button(rowBtn(0), "Bills and recharges", C_ORANGE, TFT_WHITE, 4);
-  button(rowBtn(1), "Today's sales on this counter", C_KEY, C_INK, 2);
-  button(rowBtn(2), "Back", C_KEY, C_INK, 2);
+  button(rowBtn(1), tripOn ? "Trip mode (running)" : "Trip mode (microbus)", C_KEY, C_INK, 2);
+  button(rowBtn(2), "Today's sales on this counter", C_KEY, C_INK, 2);
+  button(rowBtn(3), "Back", C_KEY, C_INK, 2);
 }
 void drawBillers() {
   std::vector<BillerItem> list;
@@ -1379,6 +1418,85 @@ void drawBillDone() {
     tft.drawString("The shop's wallet is too low", 160, 170, 2);
   }
   tft.drawString("Tap to continue", 160, 222, 2);
+}
+
+// ---------------------------------------------------------------- trip mode (v0.10.0)
+// Intercity microbus: the driver sets the seats and the fare, starts a trip,
+// and the box counts the seats paid by transfer plus the cash seats he adds.
+int tripStep = 0;  // 0: seats, 1: fare
+String tripSeats = "", tripFare = "";
+const Btn TB_CASH{4, 180, 104, 54}, TB_MINUS{112, 180, 56, 54}, TB_CHECK{172, 180, 70, 54}, TB_END{246, 180, 70, 54};
+const Btn TE_NEW{8, 184, 148, 50}, TE_HOME{164, 184, 148, 50};
+
+bool tripEntryOk() {
+  long v = (tripStep == 0 ? tripSeats : tripFare).toInt();
+  return tripStep == 0 ? (v >= 1 && v <= 60) : (v >= 1 && v <= 2000);
+}
+void drawTripEntryOnly() {
+  tft.fillRect(0, 31, 320, 52, C_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(C_INK, C_BG);
+  String e = tripStep == 0 ? tripSeats : tripFare;
+  tft.drawString(e.length() ? e : String("-"), 8, 50, 4);
+  if (noteOn()) { tft.setTextColor(C_RED, C_BG); tft.drawString(note.substring(0, 44), 8, 74, 2); }
+  else { tft.setTextColor(C_MUTED, C_BG); tft.drawString(tripStep == 0 ? "Passenger seats, 1 to 60" : "Fare per seat, EGP", 8, 74, 2); }
+  button(BTN_QR, tripStep == 0 ? "Next" : "Start", tripEntryOk() ? C_ORANGE : C_LINE, TFT_WHITE, 4);
+}
+void drawTripSet() {
+  titleBar(tripStep == 0 ? "New trip: seats" : "New trip: fare (EGP)");
+  for (int r = 0; r < 4; r++)
+    for (int c = 0; c < 4; c++) {
+      if (!DKEYS[r][c][0]) continue;
+      button(keyBtn(r, c), DKEYS[r][c], C_KEY, C_INK, strlen(DKEYS[r][c]) > 2 ? 2 : 4);
+    }
+  drawTripEntryOnly();
+}
+void drawTrip() {
+  TripView t;
+  { Lock l; t = S.trip; }
+  titleBar("Trip  " + String(t.seats) + " seats x " + money(t.fare) + " EGP");
+  long total = t.paid + t.cash;
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(C_INK, C_BG);
+  tft.drawString(String(total), 8, 66, 6);
+  tft.drawString("/ " + String(t.seats) + " paid", 16 + tft.textWidth(String(total), 6), 74, 4);
+  tft.setTextColor(C_MUTED, C_BG);
+  tft.drawString("Transfer " + String(t.paid) + "   Cash " + String(t.cash) + (t.partial ? "   Part fares " + String(t.partial) : String("")), 8, 106, 2);
+  if (t.missing > 0) { tft.setTextColor(C_RED, C_BG); tft.drawString(String(t.missing) + " not paid", 8, 140, 4); }
+  else if (t.over > 0) { tft.setTextColor(C_AMBER, C_BG); tft.drawString("All paid, " + String(t.over) + " extra", 8, 140, 4); }
+  else { tft.setTextColor(C_GREEN_DARK, C_BG); tft.drawString("All paid", 8, 140, 4); }
+  if (noteOn()) { tft.setTextColor(C_RED, C_BG); tft.drawString(note.substring(0, 44), 8, 164, 2); }
+  button(TB_CASH, "+1 cash", C_ORANGE, TFT_WHITE, 4);
+  button(TB_MINUS, "-1", C_KEY, C_INK, 4);
+  button(TB_CHECK, "Check", C_KEY, C_INK, 2);
+  button(TB_END, "End", C_KEY, C_INK, 2);
+}
+void drawTripEnd() {
+  TripView t;
+  { Lock l; t = S.tripEnd; }
+  uint16_t bg = t.missing > 0 ? C_AMBER : C_GREEN;
+  tft.fillScreen(bg);
+  tft.setTextColor(TFT_WHITE, bg);
+  tft.setTextDatum(MC_DATUM);
+  tft.drawString("Trip ended", 160, 30, 4);
+  tft.drawString(String(t.paid + t.cash) + " of " + String(t.seats) + " paid", 160, 74, 4);
+  tft.drawString("Transfer " + String(t.paid) + "   Cash " + String(t.cash), 160, 106, 2);
+  tft.drawString(t.missing > 0 ? String(t.missing) + " not paid" : String("All paid"), 160, 142, 4);
+  button(TE_NEW, "New trip", C_ORANGE, TFT_WHITE, 4);
+  button(TE_HOME, "Home", TFT_WHITE, C_INK, 4);
+}
+void openTrip() {
+  bool on;
+  { Lock l; on = S.trip.on; }
+  if (on) { screen = SCR_TRIP; }
+  else {
+    tripStep = 0;
+    tripSeats = prefs.getString("tseats", "14");
+    tripFare = prefs.getString("tfare", "");
+    note = "";
+    screen = SCR_TRIPSET;
+  }
+  dirty = true;
 }
 
 void openEntry(Entry k) {
@@ -1558,8 +1676,16 @@ void loop() {
     Lock l;
     evs.swap(S.events);
   }
+  bool tripOnNow;
+  long tripLeftNow;
+  {
+    Lock l;
+    tripOnNow = S.trip.on;
+    tripLeftNow = S.trip.missing;
+  }
   for (auto &e : evs) {
     announce(e);
+    if (tripOnNow) say(words::tripLeft(tripLeftNow, false));
     if (screen == SCR_HOME) drawTop();
     // A payment of the sale's amount while its QR is showing: show the tick at
     // once. The server attaches it to the sale (straight away, or after the
@@ -1612,6 +1738,9 @@ void loop() {
     else if (screen == SCR_BILLACCT) drawBillAcct();
     else if (screen == SCR_BILLQUOTE) drawBillQuote();
     else if (screen == SCR_BILLDONE) drawBillDone();
+    else if (screen == SCR_TRIPSET) drawTripSet();
+    else if (screen == SCR_TRIP) drawTrip();
+    else if (screen == SCR_TRIPEND) drawTripEnd();
   }
 
   // A cashier request was answered.
@@ -1651,6 +1780,16 @@ void loop() {
     } else if (rq.startsWith("action=logout")) {
       pinTyped = ""; loginStep = LS_MOBILE;
       screen = SCR_SIGNIN;
+    } else if (rq.startsWith("action=trip&op=start")) {
+      note = "";
+      screen = SCR_TRIP;
+    } else if (rq.startsWith("action=trip&op=end")) {
+      long m;
+      { Lock l; m = S.tripEnd.missing; }
+      say(words::tripLeft(m, true));
+      screen = SCR_TRIPEND;
+    } else if (rq.startsWith("action=trip")) {
+      // +1 / -1 cash: the trip screen redraws below
     } else if (rq.startsWith("action=billrest")) {
       setNote("Bill paid. Thank you!", 4000);
       resultSince = millis();
@@ -1709,6 +1848,11 @@ void loop() {
       resultSince = millis();
       dirty = true;
     }
+  }
+  {
+    bool ch;
+    { Lock l; ch = S.tripChanged; S.tripChanged = false; }
+    if (ch && (screen == SCR_TRIP || screen == SCR_MENU)) dirty = true;
   }
   if (screen == SCR_RESULT) {
     static String lastBill;
@@ -1925,9 +2069,10 @@ void loop() {
       return;
     }
   } else if (screen == SCR_MENU) {
-    if (BTN_BACKBAR.hit(x, y) || rowBtn(2).hit(x, y)) { screen = SCR_HOME; dirty = true; }
+    if (BTN_BACKBAR.hit(x, y) || rowBtn(3).hit(x, y)) { screen = SCR_HOME; dirty = true; }
     else if (rowBtn(0).hit(x, y)) { billerPick = -1; screen = SCR_BILLERS; dirty = true; }
-    else if (rowBtn(1).hit(x, y)) { sendReq("action=today"); screen = SCR_TODAY; dirty = true; }
+    else if (rowBtn(1).hit(x, y)) openTrip();
+    else if (rowBtn(2).hit(x, y)) { sendReq("action=today"); screen = SCR_TODAY; dirty = true; }
   } else if (screen == SCR_BILLERS) {
     if (BTN_BACKBAR.hit(x, y)) { screen = SCR_MENU; dirty = true; return; }
     size_t n;
@@ -1983,6 +2128,48 @@ void loop() {
     screen = SCR_HOME;
     typed = "";
     dirty = true;
+  } else if (screen == SCR_TRIPSET) {
+    if (reqBusy()) return;
+    if (BTN_BACKBAR.hit(x, y)) {
+      if (tripStep == 1) tripStep = 0; else screen = SCR_MENU;
+      note = ""; dirty = true; return;
+    }
+    if (BTN_QR.hit(x, y)) {
+      if (!tripEntryOk()) return;
+      if (tripStep == 0) { tripStep = 1; dirty = true; return; }
+      prefs.putString("tseats", tripSeats);
+      prefs.putString("tfare", tripFare);
+      sendReq("action=trip&op=start&seats=" + tripSeats + "&fare=" + tripFare);
+      drawTripEntryOnly();
+      return;
+    }
+    for (int r = 0; r < 4; r++)
+      for (int c = 0; c < 4; c++) {
+        const char *k = DKEYS[r][c];
+        if (!k[0] || !keyBtn(r, c).hit(x, y)) continue;
+        String &e = tripStep == 0 ? tripSeats : tripFare;
+        if (!strcmp(k, "Del")) { if (e.length()) e.remove(e.length() - 1); }
+        else if (!strcmp(k, "Clear")) e = "";
+        else if (e.length() < (tripStep == 0 ? 2u : 4u) && !(e.isEmpty() && k[0] == '0')) e += k;
+        note = "";
+        drawTripEntryOnly();
+        return;
+      }
+  } else if (screen == SCR_TRIP) {
+    if (BTN_BACKBAR.hit(x, y)) { screen = SCR_HOME; typed = ""; dirty = true; return; }
+    if (reqBusy()) return;
+    if (TB_CASH.hit(x, y)) { sendReq("action=trip&op=cash&delta=1"); return; }
+    if (TB_MINUS.hit(x, y)) { sendReq("action=trip&op=cash&delta=-1"); return; }
+    if (TB_CHECK.hit(x, y)) {
+      long m;
+      { Lock l; m = S.trip.missing; }
+      say(words::tripLeft(m, true));
+      return;
+    }
+    if (TB_END.hit(x, y)) { sendReq("action=trip&op=end"); return; }
+  } else if (screen == SCR_TRIPEND) {
+    if (TE_NEW.hit(x, y)) { openTrip(); return; }
+    if (TE_HOME.hit(x, y)) { screen = SCR_HOME; typed = ""; dirty = true; }
   } else if (screen == SCR_SETTINGS) {
     if (SB_WIFI.hit(x, y)) runPortal();
     else if (SB_CAL.hit(x, y)) { calibrate(); dirty = true; }
