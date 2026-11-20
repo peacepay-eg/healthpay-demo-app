@@ -36,6 +36,13 @@ Business type, or a new shop of kind Transport on the admin page) has drivers,
 and the box opens trip mode by itself after it starts. Back leaves trip mode
 for the amount keypad, which a taxi driver uses to type the meter fare.
 
+v0.11.0 (server v0.12.0): several cars on one wallet. Each soundbox of a
+transport business is a car; when the owner has several, the box asks which car
+before the seats. Payments carrying a car's label (its sticker, or a seat
+sticker S01P07) count in that car's trip only; a transfer with no label while
+two cars run is shown as "which car?". With seat stickers, Check and End say
+"seat 3 and seat 4, not paid". New voice clip: seat.
+
 | File | Board |
 |---|---|
 | HealthPayBox_2432S028R.bin | ESP32-2432S028R (ILI9341 screen) - try this first |

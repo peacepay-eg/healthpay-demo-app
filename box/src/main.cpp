@@ -37,7 +37,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.10.1"
+#define BOX_VERSION "0.11.0"
 static const bool RESTAURANT = true;  // restaurant features follow the server's business type
 #define BOX_KIND "Shop+Cafe"
 #ifndef BOX_BOARD
@@ -184,7 +184,13 @@ struct BillView {
 // Trip mode (intercity microbus): seats paid by transfer, cash seats, seats missing.
 struct TripView {
   bool on = false;
-  long seats = 0, fare = 0, paid = 0, cash = 0, missing = 0, over = 0, partial = 0;
+  long seats = 0, fare = 0, paid = 0, cash = 0, missing = 0, over = 0, partial = 0, unassigned = 0;
+  String carName;
+  std::vector<long> notPaidSeats;  // seat stickers: the seats not paid, when they are known
+};
+// A car of a transport business (each soundbox is a car).
+struct CarItem {
+  String id, code, name;
 };
 
 struct Event {
@@ -236,6 +242,7 @@ struct Shared {
   BillView bill;
   TripView trip, tripEnd;  // the running trip, and the last one ended
   String kind;             // business type from the server: shop, restaurant or transport
+  std::vector<CarItem> cars;
   bool tripChanged = false;
   Req req;
   uint32_t lastPollMs = 0;
@@ -317,6 +324,9 @@ TripView readTrip(JsonObject t) {
   v.missing = t["missing"] | 0;
   v.over = t["over"] | 0;
   v.partial = t["partial"] | 0;
+  v.unassigned = t["unassigned"] | 0;
+  v.carName = (const char *)(t["carName"] | "");
+  for (JsonVariant n : t["notPaidSeats"].as<JsonArray>()) if (v.notPaidSeats.size() < 12) v.notPaidSeats.push_back(n.as<long>());
   return v;
 }
 
@@ -354,6 +364,14 @@ void netHello() {
   S.serverNow = doc["now"] | 0LL;
   readStaff(doc);
   readUser(doc);
+  S.cars.clear();
+  for (JsonObject c : doc["cars"].as<JsonArray>()) {
+    CarItem it;
+    it.id = (const char *)(c["id"] | "");
+    it.code = (const char *)(c["code"] | "");
+    it.name = (const char *)(c["name"] | "");
+    if (it.code.length() && S.cars.size() < 4) S.cars.push_back(it);
+  }
   S.billers.clear();
   for (JsonObject b : doc["billers"].as<JsonArray>()) {
     BillerItem it;
@@ -791,7 +809,7 @@ void drawTick(int cx, int cy, int r, uint16_t c) {
 enum Screen { SCR_HOME, SCR_QR, SCR_RESULT, SCR_SETTINGS, SCR_WAITER, SCR_TIP,
               SCR_MORE, SCR_DIGITS, SCR_INCOMING, SCR_CONFIRM, SCR_TODAY, SCR_SIGNIN,
               SCR_MENU, SCR_BILLERS, SCR_BILLACCT, SCR_BILLQUOTE, SCR_BILLDONE,
-              SCR_TRIPSET, SCR_TRIP, SCR_TRIPEND };
+              SCR_TRIPSET, SCR_TRIP, SCR_TRIPEND, SCR_TRIPCAR };
 Screen screen = SCR_HOME;
 bool dirty = true;
 String typed = "";
@@ -1426,7 +1444,7 @@ void drawBillDone() {
 // Intercity microbus: the driver sets the seats and the fare, starts a trip,
 // and the box counts the seats paid by transfer plus the cash seats he adds.
 int tripStep = 0;  // 0: seats, 1: fare
-String tripSeats = "", tripFare = "";
+String tripSeats = "", tripFare = "", tripCar = "";
 const Btn TB_CASH{4, 180, 104, 54}, TB_MINUS{112, 180, 56, 54}, TB_CHECK{172, 180, 70, 54}, TB_END{246, 180, 70, 54};
 const Btn TE_NEW{8, 184, 148, 50}, TE_HOME{164, 184, 148, 50};
 
@@ -1456,7 +1474,7 @@ void drawTripSet() {
 void drawTrip() {
   TripView t;
   { Lock l; t = S.trip; }
-  titleBar("Trip  " + String(t.seats) + " seats x " + money(t.fare) + " EGP");
+  titleBar((t.carName.length() ? t.carName + "  " : String("Trip  ")) + String(t.seats) + " x " + money(t.fare) + " EGP");
   long total = t.paid + t.cash;
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(C_INK, C_BG);
@@ -1468,6 +1486,15 @@ void drawTrip() {
   else if (t.over > 0) { tft.setTextColor(C_AMBER, C_BG); tft.drawString("All paid, " + String(t.over) + " extra", 8, 140, 4); }
   else { tft.setTextColor(C_GREEN_DARK, C_BG); tft.drawString("All paid", 8, 140, 4); }
   if (noteOn()) { tft.setTextColor(C_RED, C_BG); tft.drawString(note.substring(0, 44), 8, 164, 2); }
+  else if (t.missing > 0 && !t.notPaidSeats.empty()) {
+    String seats = "Seat ";
+    for (size_t i = 0; i < t.notPaidSeats.size(); i++) seats += (i ? ", " : "") + String(t.notPaidSeats[i]);
+    tft.setTextColor(C_RED, C_BG);
+    tft.drawString(seats.substring(0, 44), 8, 164, 2);
+  } else if (t.unassigned > 0) {
+    tft.setTextColor(C_AMBER, C_BG);
+    tft.drawString(String(t.unassigned) + " transfer(s): which car? Ask", 8, 164, 2);
+  }
   button(TB_CASH, "+1 cash", C_ORANGE, TFT_WHITE, 4);
   button(TB_MINUS, "-1", C_KEY, C_INK, 4);
   button(TB_CHECK, "Check", C_KEY, C_INK, 2);
@@ -1484,8 +1511,25 @@ void drawTripEnd() {
   tft.drawString(String(t.paid + t.cash) + " of " + String(t.seats) + " paid", 160, 74, 4);
   tft.drawString("Transfer " + String(t.paid) + "   Cash " + String(t.cash), 160, 106, 2);
   tft.drawString(t.missing > 0 ? String(t.missing) + " not paid" : String("All paid"), 160, 142, 4);
+  if (t.missing > 0 && !t.notPaidSeats.empty()) {
+    String seats = "Seat ";
+    for (size_t i = 0; i < t.notPaidSeats.size(); i++) seats += (i ? ", " : "") + String(t.notPaidSeats[i]);
+    tft.drawString(seats.substring(0, 40), 160, 166, 2);
+  }
   button(TE_NEW, "New trip", C_ORANGE, TFT_WHITE, 4);
   button(TE_HOME, "Home", TFT_WHITE, C_INK, 4);
+}
+// What to say when the driver checks or ends: the seats by number when known, otherwise how many.
+std::vector<std::string> tripVoice(const TripView &t) {
+  if (t.missing > 0 && !t.notPaidSeats.empty() && t.notPaidSeats.size() <= 5) return words::seatsNotPaid(t.notPaidSeats);
+  return words::tripLeft(t.missing, true);
+}
+void drawTripCar() {
+  std::vector<CarItem> cars;
+  { Lock l; cars = S.cars; }
+  titleBar("New trip: which car?");
+  for (size_t i = 0; i < cars.size() && i < 4; i++)
+    button(rowBtn(i), cars[i].name.c_str(), cars[i].code == tripCar ? C_ORANGE : C_KEY, cars[i].code == tripCar ? TFT_WHITE : C_INK, 2);
 }
 void openTrip() {
   bool on;
@@ -1495,8 +1539,11 @@ void openTrip() {
     tripStep = 0;
     tripSeats = prefs.getString("tseats", "14");
     tripFare = prefs.getString("tfare", "");
+    tripCar = prefs.getString("tcar", "");
     note = "";
-    screen = SCR_TRIPSET;
+    size_t nc;
+    { Lock l; nc = S.cars.size(); if (nc == 1) tripCar = S.cars[0].code; }
+    screen = nc > 1 ? SCR_TRIPCAR : SCR_TRIPSET;
   }
   dirty = true;
 }
@@ -1743,6 +1790,7 @@ void loop() {
     else if (screen == SCR_TRIPSET) drawTripSet();
     else if (screen == SCR_TRIP) drawTrip();
     else if (screen == SCR_TRIPEND) drawTripEnd();
+    else if (screen == SCR_TRIPCAR) drawTripCar();
   }
 
   // A cashier request was answered.
@@ -1786,9 +1834,9 @@ void loop() {
       note = "";
       screen = SCR_TRIP;
     } else if (rq.startsWith("action=trip&op=end")) {
-      long m;
-      { Lock l; m = S.tripEnd.missing; }
-      say(words::tripLeft(m, true));
+      TripView t;
+      { Lock l; t = S.tripEnd; }
+      say(tripVoice(t));
       screen = SCR_TRIPEND;
     } else if (rq.startsWith("action=trip")) {
       // +1 / -1 cash: the trip screen redraws below
@@ -2143,7 +2191,9 @@ void loop() {
   } else if (screen == SCR_TRIPSET) {
     if (reqBusy()) return;
     if (BTN_BACKBAR.hit(x, y)) {
-      if (tripStep == 1) tripStep = 0; else screen = SCR_MENU;
+      size_t nc;
+      { Lock l; nc = S.cars.size(); }
+      if (tripStep == 1) tripStep = 0; else screen = nc > 1 ? SCR_TRIPCAR : SCR_MENU;
       note = ""; dirty = true; return;
     }
     if (BTN_QR.hit(x, y)) {
@@ -2151,7 +2201,8 @@ void loop() {
       if (tripStep == 0) { tripStep = 1; dirty = true; return; }
       prefs.putString("tseats", tripSeats);
       prefs.putString("tfare", tripFare);
-      sendReq("action=trip&op=start&seats=" + tripSeats + "&fare=" + tripFare);
+      if (tripCar.length()) prefs.putString("tcar", tripCar);
+      sendReq("action=trip&op=start&seats=" + tripSeats + "&fare=" + tripFare + (tripCar.length() ? "&car=" + urlEncode(tripCar) : String("")));
       drawTripEntryOnly();
       return;
     }
@@ -2167,15 +2218,21 @@ void loop() {
         drawTripEntryOnly();
         return;
       }
+  } else if (screen == SCR_TRIPCAR) {
+    if (BTN_BACKBAR.hit(x, y)) { screen = SCR_MENU; dirty = true; return; }
+    std::vector<CarItem> cars;
+    { Lock l; cars = S.cars; }
+    for (size_t i = 0; i < cars.size() && i < 4; i++)
+      if (rowBtn(i).hit(x, y)) { tripCar = cars[i].code; tripStep = 0; screen = SCR_TRIPSET; dirty = true; return; }
   } else if (screen == SCR_TRIP) {
     if (BTN_BACKBAR.hit(x, y)) { screen = SCR_HOME; typed = ""; dirty = true; return; }
     if (reqBusy()) return;
     if (TB_CASH.hit(x, y)) { sendReq("action=trip&op=cash&delta=1"); return; }
     if (TB_MINUS.hit(x, y)) { sendReq("action=trip&op=cash&delta=-1"); return; }
     if (TB_CHECK.hit(x, y)) {
-      long m;
-      { Lock l; m = S.trip.missing; }
-      say(words::tripLeft(m, true));
+      TripView t;
+      { Lock l; t = S.trip; }
+      say(tripVoice(t));
       return;
     }
     if (TB_END.hit(x, y)) { sendReq("action=trip&op=end"); return; }
