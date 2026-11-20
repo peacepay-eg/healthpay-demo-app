@@ -48,6 +48,10 @@ seats and fare; the box fills them in, and with a **fixed fare** it skips the
 fare step. Card payments from the car sticker's card QR count in the trip
 ("Card N").
 
+v0.12.1 (server v0.13.1): a car can be a **Taxi** (owner page). Taxis have no
+trips: the sticker's wallet and card QRs take any amount and the car's soundbox
+announces it. When every car is a taxi, the box stays on the amount keypad.
+
 | File | Board |
 |---|---|
 | HealthPayBox_2432S028R.bin | ESP32-2432S028R (ILI9341 screen) - try this first |

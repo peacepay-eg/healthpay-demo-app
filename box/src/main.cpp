@@ -37,7 +37,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.12.0"
+#define BOX_VERSION "0.12.1"
 static const bool RESTAURANT = true;  // restaurant features follow the server's business type
 #define BOX_KIND "Shop+Cafe"
 #ifndef BOX_BOARD
@@ -243,7 +243,8 @@ struct Shared {
   BillView bill;
   TripView trip, tripEnd;  // the running trip, and the last one ended
   String kind;             // business type from the server: shop, restaurant or transport
-  std::vector<CarItem> cars;
+  std::vector<CarItem> cars;  // microbuses only (taxis need no trip)
+  bool tripsOn = true;         // false when every car is a taxi
   bool tripChanged = false;
   Req req;
   uint32_t lastPollMs = 0;
@@ -365,6 +366,7 @@ void netHello() {
   S.serverNow = doc["now"] | 0LL;
   readStaff(doc);
   readUser(doc);
+  S.tripsOn = doc["trips"] | true;
   S.cars.clear();
   for (JsonObject c : doc["cars"].as<JsonArray>()) {
     CarItem it;
@@ -1914,7 +1916,10 @@ void loop() {
     if (!tripAuto && screen == SCR_HOME) {
       String k;
       { Lock l; k = S.kind; }
-      if (k == "transport") { tripAuto = true; openTrip(); }
+      bool on;
+      { Lock l; on = S.tripsOn; }
+      if (k == "transport" && on) { tripAuto = true; openTrip(); }
+      else if (k == "transport") tripAuto = true;  // taxis only: the box stays on the amount keypad
       else if (k.length()) tripAuto = true;
     }
   }
