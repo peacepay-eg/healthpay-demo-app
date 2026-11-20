@@ -1447,6 +1447,7 @@ void drawBillDone() {
 // ---------------------------------------------------------------- trip mode (v0.10.0)
 // Intercity microbus: the driver sets the seats and the fare, starts a trip,
 // and the box counts the seats paid by transfer plus the cash seats he adds.
+CarItem carByCode(const String &code);  // below: the chosen car's saved settings
 int tripStep = 0;  // 0: seats, 1: fare
 String tripSeats = "", tripFare = "", tripCar = "";
 const Btn TB_CASH{4, 180, 104, 54}, TB_MINUS{112, 180, 56, 54}, TB_CHECK{172, 180, 70, 54}, TB_END{246, 180, 70, 54};
