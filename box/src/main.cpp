@@ -37,7 +37,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.11.0"
+#define BOX_VERSION "0.12.0"
 static const bool RESTAURANT = true;  // restaurant features follow the server's business type
 #define BOX_KIND "Shop+Cafe"
 #ifndef BOX_BOARD
@@ -184,13 +184,14 @@ struct BillView {
 // Trip mode (intercity microbus): seats paid by transfer, cash seats, seats missing.
 struct TripView {
   bool on = false;
-  long seats = 0, fare = 0, paid = 0, cash = 0, missing = 0, over = 0, partial = 0, unassigned = 0;
+  long seats = 0, fare = 0, paid = 0, cash = 0, missing = 0, over = 0, partial = 0, unassigned = 0, card = 0;
   String carName;
-  std::vector<long> notPaidSeats;  // seat stickers: the seats not paid, when they are known
 };
 // A car of a transport business (each soundbox is a car).
 struct CarItem {
   String id, code, name;
+  long seats = 0, fare = 0;  // saved by the owner
+  bool locked = false;       // fixed fare: the driver can't change it
 };
 
 struct Event {
@@ -326,7 +327,7 @@ TripView readTrip(JsonObject t) {
   v.partial = t["partial"] | 0;
   v.unassigned = t["unassigned"] | 0;
   v.carName = (const char *)(t["carName"] | "");
-  for (JsonVariant n : t["notPaidSeats"].as<JsonArray>()) if (v.notPaidSeats.size() < 12) v.notPaidSeats.push_back(n.as<long>());
+  v.card = t["card"] | 0;
   return v;
 }
 
@@ -370,6 +371,9 @@ void netHello() {
     it.id = (const char *)(c["id"] | "");
     it.code = (const char *)(c["code"] | "");
     it.name = (const char *)(c["name"] | "");
+    it.seats = c["seats"] | 0;
+    it.fare = lround((double)(c["fare"] | 0.0));
+    it.locked = c["locked"] | false;
     if (it.code.length() && S.cars.size() < 4) S.cars.push_back(it);
   }
   S.billers.clear();
@@ -1459,8 +1463,12 @@ void drawTripEntryOnly() {
   String e = tripStep == 0 ? tripSeats : tripFare;
   tft.drawString(e.length() ? e : String("-"), 8, 50, 4);
   if (noteOn()) { tft.setTextColor(C_RED, C_BG); tft.drawString(note.substring(0, 44), 8, 74, 2); }
-  else { tft.setTextColor(C_MUTED, C_BG); tft.drawString(tripStep == 0 ? "Passenger seats, 1 to 60" : "Fare per seat, EGP", 8, 74, 2); }
-  button(BTN_QR, tripStep == 0 ? "Next" : "Start", tripEntryOk() ? C_ORANGE : C_LINE, TFT_WHITE, 4);
+  else {
+    bool fixed = carByCode(tripCar).locked;
+    tft.setTextColor(C_MUTED, C_BG);
+    tft.drawString(tripStep == 0 ? (fixed ? "Seats. Fare fixed: " + tripFare + " EGP" : String("Passenger seats, 1 to 60")) : String("Fare per seat, EGP"), 8, 74, 2);
+  }
+  button(BTN_QR, tripStep == 0 && !carByCode(tripCar).locked ? "Next" : "Start", tripEntryOk() ? C_ORANGE : C_LINE, TFT_WHITE, 4);
 }
 void drawTripSet() {
   titleBar(tripStep == 0 ? "New trip: seats" : "New trip: fare (EGP)");
@@ -1481,17 +1489,12 @@ void drawTrip() {
   tft.drawString(String(total), 8, 66, 6);
   tft.drawString("/ " + String(t.seats) + " paid", 16 + tft.textWidth(String(total), 6), 74, 4);
   tft.setTextColor(C_MUTED, C_BG);
-  tft.drawString("Transfer " + String(t.paid) + "   Cash " + String(t.cash) + (t.partial ? "   Part fares " + String(t.partial) : String("")), 8, 106, 2);
+  tft.drawString("Transfer " + String(t.paid - t.card) + (t.card ? "   Card " + String(t.card) : String("")) + "   Cash " + String(t.cash) + (t.partial ? "   Part " + String(t.partial) : String("")), 8, 106, 2);
   if (t.missing > 0) { tft.setTextColor(C_RED, C_BG); tft.drawString(String(t.missing) + " not paid", 8, 140, 4); }
   else if (t.over > 0) { tft.setTextColor(C_AMBER, C_BG); tft.drawString("All paid, " + String(t.over) + " extra", 8, 140, 4); }
   else { tft.setTextColor(C_GREEN_DARK, C_BG); tft.drawString("All paid", 8, 140, 4); }
   if (noteOn()) { tft.setTextColor(C_RED, C_BG); tft.drawString(note.substring(0, 44), 8, 164, 2); }
-  else if (t.missing > 0 && !t.notPaidSeats.empty()) {
-    String seats = "Seat ";
-    for (size_t i = 0; i < t.notPaidSeats.size(); i++) seats += (i ? ", " : "") + String(t.notPaidSeats[i]);
-    tft.setTextColor(C_RED, C_BG);
-    tft.drawString(seats.substring(0, 44), 8, 164, 2);
-  } else if (t.unassigned > 0) {
+  else if (t.unassigned > 0) {
     tft.setTextColor(C_AMBER, C_BG);
     tft.drawString(String(t.unassigned) + " transfer(s): which car? Ask", 8, 164, 2);
   }
@@ -1509,20 +1512,24 @@ void drawTripEnd() {
   tft.setTextDatum(MC_DATUM);
   tft.drawString("Trip ended", 160, 30, 4);
   tft.drawString(String(t.paid + t.cash) + " of " + String(t.seats) + " paid", 160, 74, 4);
-  tft.drawString("Transfer " + String(t.paid) + "   Cash " + String(t.cash), 160, 106, 2);
+  tft.drawString("Transfer " + String(t.paid - t.card) + (t.card ? "   Card " + String(t.card) : String("")) + "   Cash " + String(t.cash), 160, 106, 2);
   tft.drawString(t.missing > 0 ? String(t.missing) + " not paid" : String("All paid"), 160, 142, 4);
-  if (t.missing > 0 && !t.notPaidSeats.empty()) {
-    String seats = "Seat ";
-    for (size_t i = 0; i < t.notPaidSeats.size(); i++) seats += (i ? ", " : "") + String(t.notPaidSeats[i]);
-    tft.drawString(seats.substring(0, 40), 160, 166, 2);
-  }
+
   button(TE_NEW, "New trip", C_ORANGE, TFT_WHITE, 4);
   button(TE_HOME, "Home", TFT_WHITE, C_INK, 4);
 }
-// What to say when the driver checks or ends: the seats by number when known, otherwise how many.
-std::vector<std::string> tripVoice(const TripView &t) {
-  if (t.missing > 0 && !t.notPaidSeats.empty() && t.notPaidSeats.size() <= 5) return words::seatsNotPaid(t.notPaidSeats);
-  return words::tripLeft(t.missing, true);
+// What to say when the driver checks or ends: how many haven't paid.
+std::vector<std::string> tripVoice(const TripView &t) { return words::tripLeft(t.missing, true); }
+// The chosen car's saved settings fill the trip; a fixed fare can't be changed.
+CarItem carByCode(const String &code) {
+  Lock l;
+  for (auto &c : S.cars) if (c.code == code) return c;
+  return CarItem();
+}
+void applyCar() {
+  CarItem c = carByCode(tripCar);
+  if (c.seats > 0) tripSeats = String(c.seats);
+  if (c.fare > 0) tripFare = String(c.fare);
 }
 void drawTripCar() {
   std::vector<CarItem> cars;
@@ -1543,6 +1550,7 @@ void openTrip() {
     note = "";
     size_t nc;
     { Lock l; nc = S.cars.size(); if (nc == 1) tripCar = S.cars[0].code; }
+    if (nc == 1) applyCar();
     screen = nc > 1 ? SCR_TRIPCAR : SCR_TRIPSET;
   }
   dirty = true;
@@ -2198,7 +2206,7 @@ void loop() {
     }
     if (BTN_QR.hit(x, y)) {
       if (!tripEntryOk()) return;
-      if (tripStep == 0) { tripStep = 1; dirty = true; return; }
+      if (tripStep == 0 && !carByCode(tripCar).locked) { tripStep = 1; dirty = true; return; }
       prefs.putString("tseats", tripSeats);
       prefs.putString("tfare", tripFare);
       if (tripCar.length()) prefs.putString("tcar", tripCar);
@@ -2223,7 +2231,7 @@ void loop() {
     std::vector<CarItem> cars;
     { Lock l; cars = S.cars; }
     for (size_t i = 0; i < cars.size() && i < 4; i++)
-      if (rowBtn(i).hit(x, y)) { tripCar = cars[i].code; tripStep = 0; screen = SCR_TRIPSET; dirty = true; return; }
+      if (rowBtn(i).hit(x, y)) { tripCar = cars[i].code; applyCar(); tripStep = 0; screen = SCR_TRIPSET; dirty = true; return; }
   } else if (screen == SCR_TRIP) {
     if (BTN_BACKBAR.hit(x, y)) { screen = SCR_HOME; typed = ""; dirty = true; return; }
     if (reqBusy()) return;

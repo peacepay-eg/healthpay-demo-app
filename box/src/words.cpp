@@ -48,16 +48,4 @@ std::vector<std::string> tripLeft(long left, bool notPaid) {
   return o;
 }
 
-std::vector<std::string> seatsNotPaid(const std::vector<long> &seats) {
-  std::vector<std::string> o;
-  for (size_t i = 0; i < seats.size(); i++) {
-    if (i) o.push_back("wa");
-    o.push_back("seat");
-    auto a = amount(seats[i]);
-    o.insert(o.end(), a.begin(), a.end());
-  }
-  if (!o.empty()) o.push_back("notpaid");
-  return o;
-}
-
 }  // namespace words

@@ -39,9 +39,14 @@ for the amount keypad, which a taxi driver uses to type the meter fare.
 v0.11.0 (server v0.12.0): several cars on one wallet. Each soundbox of a
 transport business is a car; when the owner has several, the box asks which car
 before the seats. Payments carrying a car's label (its sticker, or a seat
-sticker S01P07) count in that car's trip only; a transfer with no label while
-two cars run is shown as "which car?". With seat stickers, Check and End say
-"seat 3 and seat 4, not paid". New voice clip: seat.
+sticker) count in that car's trip only; a transfer with no label while two cars
+run is shown as "which car?".
+
+v0.12.0 (server v0.13.0): seat stickers dropped (one QR per car is enough:
+every passenger pays the same fare, the box counts). The owner saves each car's
+seats and fare; the box fills them in, and with a **fixed fare** it skips the
+fare step. Card payments from the car sticker's card QR count in the trip
+("Card N").
 
 | File | Board |
 |---|---|

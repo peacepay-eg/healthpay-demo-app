@@ -26,8 +26,6 @@ int main(int argc, char **argv) {
   check(join(words::tripLeft(1, true)) == "left n1 notpaid", "trip 1 not paid");
   check(join(words::tripLeft(5, false)) == "left n5", "trip 5 left");
   check(join(words::tripLeft(0, true)) == "allpaid", "trip all paid");
-  check(join(words::seatsNotPaid({3, 4})) == "seat n3 wa seat n4 notpaid", "seats 3 and 4 not paid");
-  check(join(words::seatsNotPaid({})) == "", "no seats");
   check(join(words::amount(19)) == "n19", "19");
   check(join(words::amount(20)) == "n20", "20");
   check(join(words::amount(25)) == "n25", "25");
