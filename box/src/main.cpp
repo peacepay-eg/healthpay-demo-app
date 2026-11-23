@@ -37,7 +37,7 @@
 #include <XPT2046_Touchscreen.h>
 #endif
 
-#define BOX_VERSION "0.12.1"
+#define BOX_VERSION "0.12.2"
 static const bool RESTAURANT = true;  // restaurant features follow the server's business type
 #define BOX_KIND "Shop+Cafe"
 #ifndef BOX_BOARD
@@ -614,10 +614,11 @@ void netTask(void *) {
   }
 }
 
-// ---------------------------------------------------------------- audio (GPIO26 DAC, 12 kHz, 8-bit clips in flash)
+// ---------------------------------------------------------------- audio (GPIO26 DAC, 16 kHz or the rate in /rate.txt, 8-bit clips in flash)
 static uint8_t *abuf = nullptr;
-static const uint32_t ABUF_MAX = 40000;
+static const uint32_t ABUF_MAX = 48000;  // 3 seconds at 16 kHz
 static volatile uint32_t alen = 0, apos = 0;
+static uint32_t abufCap = 0;
 static volatile bool aplaying = false;
 static hw_timer_t *atimer = nullptr;
 std::vector<String> clipQueue;
@@ -640,14 +641,20 @@ void ampOn(bool on) {
 
 void audioBegin() {
   abuf = (uint8_t *)malloc(ABUF_MAX);
+  abufCap = abuf ? ABUF_MAX : 0;
 #ifdef BOX_AUDIO_EN
   pinMode(BOX_AUDIO_EN, OUTPUT);
 #endif
   ampOn(false);
   dacWrite(26, 128);
+  // The clips' sample rate comes with them (rate.txt, written by tools/make_voice.py).
+  uint32_t rate = 12000;
+  File rf = LittleFS.open("/rate.txt", "r");
+  if (rf) { uint32_t r = (uint32_t)rf.readString().toInt(); rf.close(); if (r >= 8000 && r <= 24000) rate = r; }
+  if (!abuf) { abuf = (uint8_t *)malloc(24000); abufCap = abuf ? 24000 : 0; }  // low memory: shorter clips still play
   atimer = timerBegin(0, 4, true);  // 80 MHz / 4 = 20 MHz
   timerAttachInterrupt(atimer, &onAudioTick, true);
-  timerAlarmWrite(atimer, 1667, true);  // 12 kHz
+  timerAlarmWrite(atimer, 20000000 / rate, true);
   timerAlarmEnable(atimer);
 }
 
@@ -666,7 +673,7 @@ void audioLoop() {
   if (!abuf) return;
   File f = LittleFS.open(name, "r");
   if (!f) return;
-  uint32_t n = f.read(abuf, ABUF_MAX);
+  uint32_t n = f.read(abuf, abufCap);
   f.close();
   int g = cfg.volume == 1 ? 6 : cfg.volume == 3 ? 16 : 10;  // gain x10
   for (uint32_t i = 0; i < n; i++) {

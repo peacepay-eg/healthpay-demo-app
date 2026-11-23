@@ -1,10 +1,12 @@
-"""Makes the box's Arabic voice clips (12 kHz, 8-bit unsigned, mono, raw).
+"""Makes the box's Arabic voice clips (16 kHz, 8-bit unsigned, mono, raw).
 
 Runs on the GitHub build machine: python tools/make_voice.py data
-Uses the Piper voice "ar_JO-kareem-medium" (open licence); falls back to
-espeak-ng if Piper is not available. Each clip is trimmed and its loudness
-evened out so the phrase "received 1,250 pounds" sounds like one voice.
-Also writes sample.wav (a whole phrase) so a person can listen before flashing.
+v0.12.2: a natural Egyptian female voice, Microsoft's neural "ar-EG-SalmaNeural"
+(through edge-tts; demo use only: production uses a licensed voice or a recorded
+voice actor). Falls back to Piper ("ar_JO-kareem-medium"), then espeak-ng.
+Each clip is trimmed, shaped for a small speaker (low cut, gentle compression)
+and its loudness evened out so "received 1,250 pounds" sounds like one voice.
+Writes rate.txt (the box plays at that rate) and sample.wav to listen to first.
 """
 import math
 import os
@@ -15,7 +17,9 @@ import urllib.request
 import wave
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else "data"
-RATE = 12000
+RATE = 16000
+EDGE_VOICE = "ar-EG-SalmaNeural"
+MAX_TOTAL = 2_150_000  # the box's file area is 2.4 MB
 SPEED = 0.9  # a little faster than normal speech
 VOICE_URL = "https://huggingface.co/rhasspy/piper-voices/resolve/main/ar/ar_JO/kareem/medium/"
 VOICE = "ar_JO-kareem-medium.onnx"
@@ -49,6 +53,23 @@ def clips():
     return c
 
 
+class Edge:
+    """Microsoft's neural voices through edge-tts (needs the internet)."""
+    def __init__(self):
+        import edge_tts  # noqa
+        self.edge_tts = edge_tts
+        self.say("تم", "edge_probe.wav")
+
+    def say(self, text, path):
+        import asyncio
+        mp3 = path + ".mp3"
+        async def run():
+            await self.edge_tts.Communicate(text.replace("\u0640", ""), EDGE_VOICE, rate="+5%").save(mp3)
+        asyncio.run(run())
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", mp3, path], check=True)
+        os.remove(mp3)
+
+
 class Piper:
     def __init__(self):
         from piper import PiperVoice  # noqa
@@ -77,16 +98,21 @@ class Espeak:
 def to_pcm16(path):
     """Trim silence at both ends and resample to 16 kHz mono 16-bit."""
     trim = ("silenceremove=start_periods=1:start_threshold=-42dB:start_silence=0.02,areverse,"
-            "silenceremove=start_periods=1:start_threshold=-42dB:start_silence=0.02,areverse")
+            "silenceremove=start_periods=1:start_threshold=-42dB:start_silence=0.02,areverse,"
+            # a small speaker: cut the low hum it can't play, even out the loudness, soften the top
+            "highpass=f=170,lowpass=f=%d,acompressor=threshold=-20dB:ratio=3:attack=5:release=80:makeup=4" % (RATE // 2 - 600))
     raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-af", trim, "-ar", str(RATE), "-ac", "1",
                           "-f", "s16le", "-"], check=True, capture_output=True).stdout
     return list(struct.unpack("<%dh" % (len(raw) // 2), raw))
 
 
-def to_u8(samples, peak_to=0.92, tail_ms=40):
+def to_u8(samples, peak_to=0.92, tail_ms=25):
     peak = max(1, max(abs(s) for s in samples)) if samples else 1
     g = peak_to * 32767 / peak
-    out = bytearray(max(0, min(255, int(round(128 + s * g / 256)))) for s in samples)
+    # a tiny random dither hides the 8-bit graininess
+    import random
+    rnd = random.Random(7)
+    out = bytearray(max(0, min(255, int(round(128 + s * g / 256 + rnd.uniform(-0.5, 0.5))))) for s in samples)
     out += bytes([128]) * int(RATE * tail_ms / 1000)
     return bytes(out)
 
@@ -102,20 +128,37 @@ def ding():
 
 
 def main():
+    global RATE
     os.makedirs(OUT, exist_ok=True)
     try:
-        engine, name = Piper(), "piper"
-    except Exception as e:  # noqa
-        print("Piper not available (%s); using espeak-ng" % e)
-        engine, name = Espeak(), "espeak-ng"
+        build()
+    except SystemExit as e:
+        if "too large" not in str(e):
+            raise
+        print("Too large at %d Hz; making the clips at 12 kHz" % RATE)
+        RATE = 12000
+        build()
+
+
+def build():
+    os.makedirs(OUT, exist_ok=True)
+    engine = None
+    for cls, nm in ((Edge, "edge " + EDGE_VOICE), (Piper, "piper"), (Espeak, "espeak-ng")):
+        try:
+            engine, name = cls(), nm
+            break
+        except Exception as e:  # noqa
+            print("%s not available (%s)" % (nm, e))
+    if engine is None:
+        sys.exit("No voice engine")
     total = 0
     tmp = "clip_tmp.wav"
     made = {}
     for key, text in clips().items():
         engine.say(text, tmp)
         data = to_u8(to_pcm16(tmp))
-        if len(data) > 40000:  # the box plays clips of up to 3.3 seconds
-            data = data[:40000]
+        if len(data) > 48000:  # the box plays clips of up to 3 seconds
+            data = data[:48000]
         with open(os.path.join(OUT, key + ".u8"), "wb") as f:
             f.write(data)
         made[key] = data
@@ -126,8 +169,10 @@ def main():
     made["ding"] = d
     total += len(d)
     print("voice: %s, %d clips, %d bytes" % (name, len(made), total))
-    if total > 2_000_000:
+    if total > MAX_TOTAL:
         sys.exit("Voice clips too large for the flash")
+    with open(os.path.join(OUT, "rate.txt"), "w") as f:
+        f.write(str(RATE))
     # A whole phrase to listen to: received 1,250 pounds from ...620
     phrase = ["ding", "recv", "k1", "wa", "h200", "wa", "n50", "egp", "from", "n6", "n2", "d0"]
     with wave.open("sample.wav", "wb") as w:

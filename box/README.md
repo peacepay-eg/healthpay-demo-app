@@ -48,6 +48,11 @@ seats and fare; the box fills them in, and with a **fixed fare** it skips the
 fare step. Card payments from the car sticker's card QR count in the trip
 ("Card N").
 
+v0.12.2: a more human voice. The clips are made with a natural Egyptian female voice
+(Microsoft neural "Salma", demo use only), shaped for the small speaker, at 16 kHz.
+Listen to sample.wav from the build before flashing. Production uses a licensed voice
+or a recorded voice actor.
+
 v0.12.1 (server v0.13.1): a car can be a **Taxi** (owner page). Taxis have no
 trips: the sticker's wallet and card QRs take any amount and the car's soundbox
 announces it. When every car is a taxi, the box stays on the amount keypad.

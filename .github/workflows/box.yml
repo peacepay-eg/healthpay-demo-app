@@ -27,7 +27,7 @@ jobs:
       - name: Tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg espeak-ng
-          pip install -q platformio esptool piper-tts
+          pip install -q platformio esptool piper-tts edge-tts
       - name: Voice clips
         run: python tools/make_voice.py data
       - uses: actions/cache@v4
